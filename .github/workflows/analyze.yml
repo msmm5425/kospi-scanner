@@ -1,0 +1,56 @@
+name: KOSPI 15:50 Error Log & TOP20 Analyze
+
+on:
+  schedule:
+    # 평일 15:50 KST (UTC 06:50)
+    - cron: "50 6 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run without committing JSON or sending Telegram"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kospi-scanner-state
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Run 15:50 error log + TOP20 reverse analysis
+        env:
+          DATA_PROVIDER: ${{ vars.DATA_PROVIDER || 'pykrx' }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          KIS_API_BASE_URL: ${{ vars.KIS_API_BASE_URL || 'https://openapi.koreainvestment.com:9443' }}
+          KOSPI_TELEGRAM_TOKEN: ${{ secrets.KOSPI_TELEGRAM_TOKEN }}
+          KOSPI_TELEGRAM_CHAT_ID: ${{ secrets.KOSPI_TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            python main_analyze.py --dry-run
+          else
+            python main_analyze.py
+          fi
+      - name: Commit daily analysis logs
+        if: github.event.inputs.dry_run != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add storage/data/signals_log.json storage/data/top20_history.json storage/data/pattern_queue.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(data): daily error log and top20 analysis [skip ci]"
+            git pull --rebase origin main || true
+            git push origin HEAD:main
+          fi

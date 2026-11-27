@@ -1,0 +1,59 @@
+name: KOSPI Intraday Swing Scan
+
+on:
+  schedule:
+    # 평일 09:30, 10:45, 13:30, 15:10 KST (UTC = KST - 9h)
+    - cron: "30 0 * * 1-5"
+    - cron: "45 1 * * 1-5"
+    - cron: "30 4 * * 1-5"
+    - cron: "10 6 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run without saving state or sending Telegram alerts"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kospi-scanner-state
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Run KOSPI intraday scan
+        env:
+          DATA_PROVIDER: ${{ vars.DATA_PROVIDER || 'pykrx' }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          KIS_API_BASE_URL: ${{ vars.KIS_API_BASE_URL || 'https://openapi.koreainvestment.com:9443' }}
+          KOSPI_TELEGRAM_TOKEN: ${{ secrets.KOSPI_TELEGRAM_TOKEN }}
+          KOSPI_TELEGRAM_CHAT_ID: ${{ secrets.KOSPI_TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            python main_scan.py --dry-run
+          else
+            python main_scan.py
+          fi
+      - name: Commit updated signals state
+        if: github.event.inputs.dry_run != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add storage/data/signals_log.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(data): update signals_log [skip ci]"
+            git pull --rebase origin main || true
+            git push origin HEAD:main
+          fi

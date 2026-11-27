@@ -1,0 +1,34 @@
+name: KOSPI Friday Weekly Report
+
+on:
+  schedule:
+    # 금요일 16:30 KST (UTC 07:30)
+    - cron: "30 7 * * 5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print report without sending Telegram"
+        required: false
+        default: "false"
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Run Friday weekly report
+        env:
+          KOSPI_TELEGRAM_TOKEN: ${{ secrets.KOSPI_TELEGRAM_TOKEN }}
+          KOSPI_TELEGRAM_CHAT_ID: ${{ secrets.KOSPI_TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            python main_weekly.py --dry-run
+          else
+            python main_weekly.py
+          fi

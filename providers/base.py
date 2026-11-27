@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+import re
+from abc import ABC, abstractmethod
+from typing import Any
+
+import pandas as pd
+
+from config.settings import settings
+
+_EXCLUDED_SUFFIX_RE = re.compile(r"(?:스팩\d*호|\d+호스팩|\d+우[A-Z]?|우선주|REITs?)$", re.IGNORECASE)
+
+
+def is_eligible_common_stock(code: str, name: str = "") -> bool:
+    """코스피 6자리 끝자리 '0' 순수 보통주 여부 및 스팩·리츠·ETF·우선주 제외 검증."""
+    c = str(code or "").strip()
+    if len(c) != 6 or not c.isdigit() or not c.endswith("0"):
+        return False
+
+    n = str(name or "").strip()
+    if not n:
+        return True
+
+    upper_n = n.upper()
+    for kw in settings.excluded_name_keywords:
+        if kw.upper() in upper_n:
+            return False
+
+    if _EXCLUDED_SUFFIX_RE.search(n):
+        return False
+    return True
+
+
+class MarketDataProvider(ABC):
+    """전략·분석 엔진이 사용하는 표준 6종 시장 데이터 인터페이스."""
+
+    provider_name: str = "base"
+
+    @abstractmethod
+    def get_universe(
+        self,
+        min_cap: int | None = None,
+        max_cap: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """코스피 보통주 필터 및 시총 범위 적용 유니버스 반환.
+
+        Returns:
+            list[dict]: 각 원소는 {'code', 'name', 'marcap', 'trading_val', 'price', 'chg_pct'} 포함.
+        """
+
+    @abstractmethod
+    def get_safety_status(self, code: str) -> dict[str, Any]:
+        """정리매매·관리종목·거래정지·투자주의/경고/위험 판별 및 현재 시세 반환.
+
+        Returns:
+            dict: {'is_safe': bool, 'reject_reason': str, 'price': float,
+                   'chg_pct': float, 'trading_val': float}
+        """
+
+    @abstractmethod
+    def get_daily_ohlcv(
+        self,
+        code: str,
+        bars: int = 150,
+        end_date: str | None = None,
+    ) -> pd.DataFrame:
+        """수정주가 적용 일봉 반환.
+
+        Returns:
+            DataFrame columns: ['date', 'open', 'high', 'low', 'close', 'volume', 'amount']
+            ascending by date ('YYYY-MM-DD').
+        """
+
+    @abstractmethod
+    def get_investor_supply(
+        self,
+        code: str,
+        days: int = 5,
+        end_date: str | None = None,
+    ) -> dict[str, Any]:
+        """최근 N거래일 외인·기관 순매수량(주) 집계 반환.
+
+        Returns:
+            dict: {'frgn_today': int, 'orgn_today': int, 'frgn_3d': int, 'orgn_3d': int,
+                   'total_5d': int, 'pos_days_5d': int, 'intraday_pending': bool}
+        """
+
+    @abstractmethod
+    def get_index_ohlcv(
+        self,
+        bars: int = 100,
+        end_date: str | None = None,
+    ) -> pd.DataFrame:
+        """KOSPI 지수(KS11) 일봉 반환.
+
+        Returns:
+            DataFrame columns: ['date', 'close', 'chg_pct'] ascending by date.
+        """
+
+    @abstractmethod
+    def get_top_gainers(
+        self,
+        top_n: int = 20,
+        end_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """코스피 보통주 상승률 상위 top_n 종목 반환.
+
+        Returns:
+            list[dict]: {'code', 'name', 'close', 'chg_pct', 'trading_val', 'marcap'}
+        """
+
+    def get_sector_map(self) -> dict[str, str]:
+        """선택적 업종 매핑 {code: sector} 반환 (미지원 프로바이더는 빈 dict)."""
+        return {}
