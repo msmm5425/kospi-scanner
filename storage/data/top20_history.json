@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-27 16:52:17 KST",
+  "updated_at": "2026-11-27 17:04:15 KST",
   "history": [
     {
       "date": "2026-11-02",
@@ -4283,17 +4283,17 @@
     },
     {
       "date": "2026-11-27",
-      "top20_count": 14,
+      "top20_count": 16,
       "hit_count": 0,
-      "miss_count": 14,
+      "miss_count": 16,
       "hit_rate_pct": 0.0,
       "hits": [],
       "misses": [
         {
           "code": "009470",
           "name": "삼화전기",
-          "chg_pct": 24.02,
-          "trading_val_uk": 84.2,
+          "chg_pct": 24.67,
+          "trading_val_uk": 85.1,
           "diagnosis": "D-3 Track B 근접 탈락 [거래대금 부족 (16.6억 < 30억); 당일 음봉/도지 (종가 24,800 <= 시가 24,800)]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [
@@ -4304,8 +4304,8 @@
         {
           "code": "006110",
           "name": "삼아알미늄",
-          "chg_pct": 15.35,
-          "trading_val_uk": 185.8,
+          "chg_pct": 15.76,
+          "trading_val_uk": 186.5,
           "diagnosis": "D-1 Track B 근접 탈락 [상대강도 열위 (RS20 -18.4%, RS60 -14.5%); 기준봉 조건 미충족 (최근 최대 양봉 +8.5%, 거래량 60%)]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [],
@@ -4315,7 +4315,7 @@
           "code": "181710",
           "name": "NHN",
           "chg_pct": 15.33,
-          "trading_val_uk": 373.0,
+          "trading_val_uk": 373.1,
           "diagnosis": "D-2 Track B 근접 탈락 [종가 기준봉 중심(73,200) 이탈 / 조정 중 20MA 이탈; 전일비 거래량 61% < 150%]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [
@@ -4327,28 +4327,28 @@
           "code": "475560",
           "name": "더본코리아",
           "chg_pct": 15.0,
-          "trading_val_uk": 37.8,
+          "trading_val_uk": 37.9,
           "diagnosis": "D-3 Track B 근접 탈락 [거래대금 부족 (2.1억 < 30억); 기준봉 조건 미충족 (최근 최대 양봉 +1.5%, 거래량 26%)]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [],
           "rr_viable_1to3": true
         },
         {
-          "code": "039490",
-          "name": "키움증권",
-          "chg_pct": 13.48,
-          "trading_val_uk": 613.8,
-          "diagnosis": "D-1 Track B 근접 탈락 [기준봉 조건 미충족 (최근 최대 양봉 +4.6%, 거래량 239%)]",
+          "code": "006800",
+          "name": "미래에셋증권",
+          "chg_pct": 14.61,
+          "trading_val_uk": 636.0,
+          "diagnosis": "D-3 Track B 근접 탈락 [상대강도 열위 (RS20 -9.5%, RS60 -20.3%); 기준봉 조건 미충족 (최근 최대 양봉 +1.5%, 거래량 105%)]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [],
           "rr_viable_1to3": false
         },
         {
-          "code": "006800",
-          "name": "미래에셋증권",
-          "chg_pct": 13.36,
-          "trading_val_uk": 627.6,
-          "diagnosis": "D-3 Track B 근접 탈락 [상대강도 열위 (RS20 -9.5%, RS60 -20.3%); 기준봉 조건 미충족 (최근 최대 양봉 +1.5%, 거래량 105%)]",
+          "code": "039490",
+          "name": "키움증권",
+          "chg_pct": 13.97,
+          "trading_val_uk": 617.4,
+          "diagnosis": "D-1 Track B 근접 탈락 [기준봉 조건 미충족 (최근 최대 양봉 +4.6%, 거래량 239%)]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [],
           "rr_viable_1to3": false
@@ -4356,8 +4356,8 @@
         {
           "code": "003010",
           "name": "혜인",
-          "chg_pct": 12.81,
-          "trading_val_uk": 78.3,
+          "chg_pct": 13.33,
+          "trading_val_uk": 78.8,
           "diagnosis": "D-1 Track B 근접 탈락 [윗꼬리 과다 (0.52 > 0.40); 상대강도 열위 (RS20 -8.1%, RS60 -24.4%)]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [],
@@ -4366,8 +4366,8 @@
         {
           "code": "272210",
           "name": "한화시스템",
-          "chg_pct": 12.74,
-          "trading_val_uk": 472.9,
+          "chg_pct": 13.15,
+          "trading_val_uk": 475.9,
           "diagnosis": "D-3 Track B 근접 탈락 [상대강도 열위 (RS20 -13.0%, RS60 -8.4%); 기준봉 조건 미충족 (최근 최대 양봉 +9.0%, 거래량 44%)]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [
@@ -4378,7 +4378,7 @@
         {
           "code": "077500",
           "name": "유니퀘스트",
-          "chg_pct": 12.73,
+          "chg_pct": 12.62,
           "trading_val_uk": 46.1,
           "diagnosis": "D-3 Track B 근접 탈락 [당일 음봉/도지 (종가 10,330 <= 시가 10,540); 윗꼬리 과다 (0.77 > 0.40)]",
           "nearest_track": "TRACK_B_PULLBACK",
@@ -4386,10 +4386,20 @@
           "rr_viable_1to3": true
         },
         {
+          "code": "071050",
+          "name": "한국금융지주",
+          "chg_pct": 12.3,
+          "trading_val_uk": 340.2,
+          "diagnosis": "D-3 Track B 근접 탈락 [상대강도 열위 (RS20 -1.2%, RS60 -6.9%); 기준봉 조건 미충족 (최근 최대 양봉 +2.8%, 거래량 163%)]",
+          "nearest_track": "TRACK_B_PULLBACK",
+          "feature_tags": [],
+          "rr_viable_1to3": false
+        },
+        {
           "code": "004710",
           "name": "한솔테크닉스",
-          "chg_pct": 12.24,
-          "trading_val_uk": 40.0,
+          "chg_pct": 11.84,
+          "trading_val_uk": 39.9,
           "diagnosis": "D-3 Track B 근접 탈락 [거래대금 부족 (28.7억 < 30억); 기준봉 조건 미충족 (최근 최대 양봉 +6.4%, 거래량 141%)]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [
@@ -4398,20 +4408,22 @@
           "rr_viable_1to3": true
         },
         {
-          "code": "071050",
-          "name": "한국금융지주",
-          "chg_pct": 12.22,
-          "trading_val_uk": 340.0,
-          "diagnosis": "D-3 Track B 근접 탈락 [상대강도 열위 (RS20 -1.2%, RS60 -6.9%); 기준봉 조건 미충족 (최근 최대 양봉 +2.8%, 거래량 163%)]",
+          "code": "093370",
+          "name": "후성",
+          "chg_pct": 11.7,
+          "trading_val_uk": 176.4,
+          "diagnosis": "D-3 Track B 근접 탈락 [상대강도 열위 (RS20 -5.2%, RS60 -4.7%); 기준봉 조건 미충족 (최근 최대 양봉 +15.0%, 거래량 208%)]",
           "nearest_track": "TRACK_B_PULLBACK",
-          "feature_tags": [],
-          "rr_viable_1to3": false
+          "feature_tags": [
+            "UPPER_SHADOW_ABSORB"
+          ],
+          "rr_viable_1to3": true
         },
         {
           "code": "317400",
           "name": "자이에스앤디",
-          "chg_pct": 11.81,
-          "trading_val_uk": 58.9,
+          "chg_pct": 11.45,
+          "trading_val_uk": 58.8,
           "diagnosis": "D-2 Track B 근접 탈락 [거래대금 부족 (15.9억 < 30억); 당일 상승 탄력 부족 (-1.05% < +1.5%)]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [],
@@ -4420,23 +4432,31 @@
         {
           "code": "071970",
           "name": "HD현대마린엔진",
-          "chg_pct": 11.75,
-          "trading_val_uk": 76.0,
+          "chg_pct": 11.26,
+          "trading_val_uk": 75.7,
           "diagnosis": "D-3 Track B 근접 탈락 [기준봉 조건 미충족 (최근 최대 양봉 +11.3%, 거래량 77%)]",
           "nearest_track": "TRACK_B_PULLBACK",
           "feature_tags": [],
           "rr_viable_1to3": true
         },
         {
-          "code": "093370",
-          "name": "후성",
-          "chg_pct": 11.45,
-          "trading_val_uk": 175.2,
-          "diagnosis": "D-3 Track B 근접 탈락 [상대강도 열위 (RS20 -5.2%, RS60 -4.7%); 기준봉 조건 미충족 (최근 최대 양봉 +15.0%, 거래량 208%)]",
+          "code": "450080",
+          "name": "에코프로머티",
+          "chg_pct": 10.8,
+          "trading_val_uk": 107.4,
+          "diagnosis": "D-3 Track B 근접 탈락 [당일 급등 추격 차단 (+11.41% > +10.0%); 기준봉 조건 미충족 (최근 최대 양봉 +8.7%, 거래량 90%)]",
           "nearest_track": "TRACK_B_PULLBACK",
-          "feature_tags": [
-            "UPPER_SHADOW_ABSORB"
-          ],
+          "feature_tags": [],
+          "rr_viable_1to3": false
+        },
+        {
+          "code": "322000",
+          "name": "HD현대에너지솔루션",
+          "chg_pct": 10.78,
+          "trading_val_uk": 99.0,
+          "diagnosis": "D-3 Track B 근접 탈락 [상대강도 열위 (RS20 -3.7%, RS60 -23.0%); 종가 기준봉 중심(84,850) 이탈 / 조정 중 20MA 이탈]",
+          "nearest_track": "TRACK_B_PULLBACK",
+          "feature_tags": [],
           "rr_viable_1to3": true
         }
       ]
