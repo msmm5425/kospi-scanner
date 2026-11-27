@@ -47,5 +47,6 @@
     "breakeven_trigger_pct": 10.0
   },
   "daily_history": [],
-  "last_adjustments": []
+  "last_adjustments": [],
+  "last_closing_briefing_date": ""
 }

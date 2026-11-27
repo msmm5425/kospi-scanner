@@ -234,6 +234,62 @@ def format_weekly_report_message(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_closing_briefing_message(briefing: dict[str, Any]) -> str:
+    """15:00 KST 장 마감 전 최종 매수 픽 브리핑 메시지 생성."""
+    dt = str(briefing.get("date") or "")
+    checked = str(briefing.get("checked_at") or "15:00 KST")
+    regime = "약세/주의 ⚠️" if str(briefing.get("market_regime", "NORMAL")).upper() == "WEAK" else "정상/강세"
+    qualified = briefing.get("qualified") or []
+    invalidated = briefing.get("invalidated") or []
+    total_today = int(briefing.get("total_today_signals", 0))
+
+    lines = [
+        f"🏁 [15:00 장 마감 매수 최종 브리핑] ({dt} · {checked})",
+        f"▪ 금일 스캔 포착: {total_today}건 → 종가 매수 적격 {len(qualified)}건 / 보류 {len(invalidated)}건",
+        f"▪ 시장 장세: {regime}",
+    ]
+
+    if qualified:
+        medals = ("🥇", "🥈", "🥉")
+        lines.append("")
+        lines.append("✅ [장 마감 전 최종 매수 픽]")
+        for idx, item in enumerate(qualified[:5]):
+            badge = medals[idx] if idx < len(medals) else f"#{idx + 1}"
+            res_txt = (
+                f"블루스카이(+{item['closing_upside_pct']:.1f}%)"
+                if item.get("is_blue_sky") or not item.get("nearest_resistance_price")
+                else f"{item['nearest_resistance_price']:,}원(+{item['closing_upside_pct']:.1f}%)"
+            )
+            lines.append(
+                f"{badge} {idx + 1}순위: {item['name']} ({item['code']}) | {item['track_label']}"
+            )
+            lines.append(
+                f"  • 15:00 현재가: {item['closing_price']:,}원 ({item['closing_chg_pct']:+.1f}%) | "
+                f"윗꼬리 {item['closing_wick']:.2f} | 점수 {item['closing_score']:.1f}"
+            )
+            lines.append(
+                f"  • 1R 방어선: {item['invalidation_ref_price']:,}원 (-{item['closing_risk_pct']:.2f}%) | "
+                f"상단 {res_txt} | R:R 1 : {item['closing_rr']:.2f}"
+            )
+            lines.append(
+                f"  • 동시호가 유효 상한: {item['max_entry_price']:,}원 이하 매수 권장"
+            )
+    else:
+        lines.append("")
+        lines.append("⏸️ 금일 15:00 기준 1:3 손익비 + 종가 안착 조건을 통과한 최종 매수 적합 종목이 없습니다 (금일 관망).")
+
+    if invalidated:
+        lines.append("")
+        lines.append("⚠️ [장중 포착 → 15:00 종가 매수 보류 종목]")
+        for inv in invalidated[:5]:
+            rsn = ", ".join(inv.get("invalidate_reasons") or ["기준 이탈"])
+            lines.append(
+                f"  - {inv['name']}({inv['code']}) {inv['closing_price']:,}원: {rsn}"
+            )
+
+    return "\n".join(lines)
+
+
 class TelegramNotifier:
     """주식 전용 텔레그램 전송기 (KOSPI_TELEGRAM_TOKEN / CHAT_ID 분리 사용)."""
 
@@ -319,3 +375,6 @@ class TelegramNotifier:
 
     def send_weekly_report(self, report: dict[str, Any]) -> bool:
         return self.send_text(format_weekly_report_message(report))
+
+    def send_closing_briefing(self, briefing: dict[str, Any]) -> bool:
+        return self.send_text(format_closing_briefing_message(briefing))

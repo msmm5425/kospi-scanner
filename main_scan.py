@@ -7,6 +7,7 @@ import sys
 from datetime import datetime
 
 from config.settings import KST, settings
+from engines.closing_picker import build_and_send_closing_briefing
 from engines.scanner import run_loop_mode, run_scan
 from notify.telegram_bot import TelegramNotifier
 from providers.factory import create_provider
@@ -32,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-minutes", type=int, default=260, help="루프 세션 최대 실행 시간(분)")
     parser.add_argument("--end-kst", default="21:05", help="루프 자동 종료 KST 시각 (HH:MM)")
     parser.add_argument("--git-sync", action="store_true", help="루프 중 신규 포착 시 Git 자동 커밋/푸시")
+    parser.add_argument("--closing-briefing", action="store_true", help="당일 포착 종목 15:00 종가 매수 재검증 브리핑 실행")
     parser.add_argument("--verbose", action="store_true", help="상세 로그 출력")
     args = parser.parse_args(argv)
 
@@ -44,6 +46,20 @@ def main(argv: list[str] | None = None) -> int:
         if not provider.is_trading_day(today_kst):
             print(f"[SCAN 스킵] {today_kst}은(는) KRX 휴장일/비개장일입니다.")
             return 0
+
+    if args.closing_briefing:
+        brief = build_and_send_closing_briefing(
+            provider=provider,
+            notifier=notifier,
+            dry_run=args.dry_run,
+            send_notifications=not args.no_notify,
+            force=args.force,
+        )
+        print(
+            f"[15:00 종가 브리핑] date={brief.get('date')} | qualified={len(brief.get('qualified') or [])} | "
+            f"invalidated={len(brief.get('invalidated') or [])}"
+        )
+        return 0
 
     if args.loop and args.date is None:
         loop_res = run_loop_mode(

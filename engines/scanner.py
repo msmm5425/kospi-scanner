@@ -499,11 +499,13 @@ def _git_sync_pull() -> None:
 
 
 def _git_sync_commit_signals(store: StorageRepo, new_signals: list[dict[str, Any]]) -> None:
-    """신규 포착 시그널을 즉시 Git에 커밋·푸시하고, 15:50 분석과 경합 시 안전 병합한다."""
-    if not new_signals:
-        return
+    """신규 포착 시그널 및 브리핑 상태를 Git에 커밋·푸시하고, 15:50 분석과 경합 시 안전 병합한다."""
     try:
-        subprocess.run(["git", "add", str(store.signals_path)], check=False, timeout=15)
+        subprocess.run(
+            ["git", "add", str(store.signals_path), str(store.learning_path)],
+            check=False,
+            timeout=15,
+        )
         diff = subprocess.run(["git", "diff", "--cached", "--quiet"], check=False, timeout=15)
         if diff.returncode == 0:
             return
@@ -527,7 +529,11 @@ def _git_sync_commit_signals(store: StorageRepo, new_signals: list[dict[str, Any
                 subprocess.run(["git", "reset", "--hard", "origin/main"], check=False, timeout=20)
                 for sig in new_signals:
                     store.upsert_signal(sig)
-                subprocess.run(["git", "add", str(store.signals_path)], check=False, timeout=15)
+                subprocess.run(
+                    ["git", "add", str(store.signals_path), str(store.learning_path)],
+                    check=False,
+                    timeout=15,
+                )
                 subprocess.run(
                     ["git", "commit", "-m", "chore(data): merge signals_log [skip ci]"],
                     check=False,
@@ -608,7 +614,27 @@ def run_loop_mode(
             f"matched={res['stats']['matched_count']} new={new_cnt} ({res['elapsed_sec']}s)"
         )
 
-        if git_sync and new_cnt > 0 and not dry_run:
+        # 매일 15:00~15:18 KST 도달 시 1회 장 마감 전 최종 매수 픽 브리핑 자동 실행
+        brief_sent_now = False
+        if now_kst.hour == 15 and 0 <= now_kst.minute < 18:
+            from engines.closing_picker import build_and_send_closing_briefing
+
+            brief = build_and_send_closing_briefing(
+                provider=cached_provider,
+                storage=store,
+                notifier=bot,
+                now_kst=now_kst,
+                dry_run=dry_run,
+                send_notifications=send_notifications,
+            )
+            if not brief.get("already_sent"):
+                brief_sent_now = True
+                print(
+                    f"[15:00 종가 브리핑] qualified={len(brief.get('qualified') or [])} | "
+                    f"invalidated={len(brief.get('invalidated') or [])}"
+                )
+
+        if git_sync and (new_cnt > 0 or brief_sent_now) and not dry_run:
             _git_sync_commit_signals(store, res["signals"])
 
         if max_iterations is not None and cycles >= max_iterations:

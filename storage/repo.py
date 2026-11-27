@@ -78,6 +78,7 @@ def _default_learning_profile() -> dict[str, Any]:
         },
         "daily_history": [],
         "last_adjustments": [],
+        "last_closing_briefing_date": "",
     }
 
 

@@ -784,3 +784,106 @@ def test_premarket_aftermarket_regular_anchor_and_loop(tmp_path) -> None:
     )
     assert hol_res["skipped_holiday"] is True
     assert hol_res["cycles"] == 0
+
+
+def test_closing_briefing_validation_and_ranking(tmp_path) -> None:
+    from engines.closing_picker import build_and_send_closing_briefing
+    from notify.telegram_bot import format_closing_briefing_message
+
+    dates = _trading_dates(160, end="2026-11-27")
+    df_good = _make_track_a_vcp_df(dates)
+    good_close = float(df_good.iloc[-1]["close"])
+
+    # 장중 포착됐지만 15:00에 긴 윗꼬리 음봉으로 꺾인 종목 생성
+    df_faded = _make_track_a_vcp_df(dates)
+    prev_c = float(df_faded.iloc[-2]["close"])
+    df_faded.loc[df_faded.index[-1], "open"] = prev_c * 1.02
+    df_faded.loc[df_faded.index[-1], "high"] = prev_c * 1.08
+    df_faded.loc[df_faded.index[-1], "close"] = prev_c * 0.995
+    df_faded.loc[df_faded.index[-1], "low"] = prev_c * 0.99
+
+    sup = {"frgn_today": 10_000, "orgn_today": 15_000, "frgn_3d": 40_000, "orgn_3d": 30_000, "total_5d": 90_000, "pos_days_5d": 4, "intraday_pending": False}
+    provider = MockProvider(
+        universe=[],
+        ohlcv_map={"100010": df_good, "100020": df_faded},
+        supply_map={"100010": sup, "100020": sup},
+        index_df=_make_index_df(dates, weak=False),
+    )
+
+    store = StorageRepo(data_dir=tmp_path)
+    store.upsert_signal(
+        {
+            "signal_id": "20261127_100010_A",
+            "signal_date": "2026-11-27",
+            "origin": "LIVE",
+            "code": "100010",
+            "name": "종가안착주",
+            "track": "TRACK_A_VCP",
+            "track_label": "Track A (VCP 타이트 돌파)",
+            "entry_price": round_to_tick(good_close),
+            "max_entry_price": round_to_tick(good_close * 1.03),
+            "rr_geometry": {
+                "invalidation_ref_price": round_to_tick(good_close * 0.955, "down"),
+                "risk_pct": 4.5,
+                "nearest_resistance_price": None,
+                "clear_upside_pct": 30.0,
+                "projected_rr": 6.67,
+                "is_blue_sky": True,
+                "max_entry_price": round_to_tick(good_close * 1.03),
+            },
+            "snapshot": {"marcap_uk": 6000, "upper_wick_ratio": 0.1, "market_regime": "NORMAL"},
+            "tracking": {"status": "ACTIVE", "days_elapsed": 0, "mfe_pct": 0.0, "mae_pct": 0.0, "max_r_multiple": 0.0, "hit_10pct": False, "hit_20pct": False, "hit_30pct": False, "hit_3r": False, "closes": {}},
+            "error_tags": [],
+        }
+    )
+    store.upsert_signal(
+        {
+            "signal_id": "20261127_100020_B",
+            "signal_date": "2026-11-27",
+            "origin": "LIVE",
+            "code": "100020",
+            "name": "윗꼬리꺾임주",
+            "track": "TRACK_B_PULLBACK",
+            "track_label": "Track B (기준봉 눌림목 재점화)",
+            "entry_price": round_to_tick(prev_c * 1.04),
+            "max_entry_price": round_to_tick(prev_c * 1.07),
+            "rr_geometry": {
+                "invalidation_ref_price": round_to_tick(prev_c * 0.99, "down"),
+                "risk_pct": 4.8,
+                "nearest_resistance_price": None,
+                "clear_upside_pct": 30.0,
+                "projected_rr": 6.25,
+                "is_blue_sky": True,
+                "max_entry_price": round_to_tick(prev_c * 1.07),
+            },
+            "snapshot": {"marcap_uk": 4000, "upper_wick_ratio": 0.1, "market_regime": "NORMAL"},
+            "tracking": {"status": "ACTIVE", "days_elapsed": 0, "mfe_pct": 0.0, "mae_pct": 0.0, "max_r_multiple": 0.0, "hit_10pct": False, "hit_20pct": False, "hit_30pct": False, "hit_3r": False, "closes": {}},
+            "error_tags": [],
+        }
+    )
+
+    brief = build_and_send_closing_briefing(
+        provider=provider,
+        storage=store,
+        now_kst=datetime(2026, 11, 27, 15, 2, tzinfo=KST),
+        send_notifications=False,
+    )
+    assert brief["already_sent"] is False
+    assert len(brief["qualified"]) == 1
+    assert brief["qualified"][0]["code"] == "100010"
+    assert len(brief["invalidated"]) == 1
+    assert brief["invalidated"][0]["code"] == "100020"
+
+    msg = format_closing_briefing_message(brief)
+    assert "15:00 장 마감 매수 최종 브리핑" in msg
+    assert "종가안착주" in msg
+    assert "윗꼬리꺾임주" in msg
+
+    # 동일 날짜 재호출 시 중복 발송 방지 확인
+    brief2 = build_and_send_closing_briefing(
+        provider=provider,
+        storage=store,
+        now_kst=datetime(2026, 11, 27, 15, 6, tzinfo=KST),
+        send_notifications=False,
+    )
+    assert brief2["already_sent"] is True
