@@ -8,6 +8,7 @@ from .settings import (
     LEARNING_PROFILE_FILE,
     Settings,
     settings,
+    classify_market_session,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "LEARNING_PROFILE_FILE",
     "Settings",
     "settings",
+    "classify_market_session",
 ]

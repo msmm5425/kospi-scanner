@@ -20,7 +20,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: kospi-scanner-state
+  group: kospi-scanner-bootstrap
   cancel-in-progress: false
 
 jobs:

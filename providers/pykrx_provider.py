@@ -679,3 +679,19 @@ class PyKRXProvider(MarketDataProvider):
         with self._lock:
             self._sector_map_cache = mapping
         return dict(mapping)
+
+    def is_trading_day(self, date_str: str | None = None) -> bool:
+        eff = date_str or datetime.now(tz=KST).strftime("%Y-%m-%d")
+        try:
+            dt_obj = datetime.strptime(eff[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return True
+        if dt_obj.weekday() >= 5:
+            return False
+        now_kst = datetime.now(tz=KST)
+        # 과거 날짜이거나 09:10 이후 당일은 실제 지수 데이터 존재 여부로 휴장일 판별
+        if eff[:10] < now_kst.strftime("%Y-%m-%d") or (
+            eff[:10] == now_kst.strftime("%Y-%m-%d") and (now_kst.hour > 9 or (now_kst.hour == 9 and now_kst.minute >= 10))
+        ):
+            return self._resolve_latest_trading_day(eff[:10]) == eff[:10]
+        return True

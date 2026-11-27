@@ -47,30 +47,63 @@ def format_signal_message(signal: dict[str, Any]) -> str:
         upside_line = f"{int(round(float(nearest_res))):,}원 (+{clear_up:.1f}%)"
 
     p4 = signal.get("phase4_sl_tp")
+    sess_info = signal.get("session_info") or {}
+    session_type = str(signal.get("session") or sess_info.get("session") or "REGULAR").upper()
+    max_entry_p = int(round(float(rr.get("max_entry_price") or signal.get("max_entry_price") or entry_p)))
+
+    if session_type == "PREMARKET":
+        header_badge = f"⏰ [프리장 포착 · 정규장 진입 기준] {name} ({code})"
+        session_line = "장 구분: 프리장(08:00~09:00) · 직전 정규장 일봉 검증"
+    elif session_type == "AFTERMARKET":
+        header_badge = f"🌙 [애프터장 포착 · 익일 정규장 기준] {name} ({code})"
+        session_line = "장 구분: 장후/애프터장(15:30~21:00) · 당일 정규장 종가 검증"
+    else:
+        header_badge = f"🚨 [KOSPI 1:3 스윙 포착] {name} ({code})"
+        session_line = f"장세: {regime_badge}"
+
+    ext_line = ""
+    if session_type in {"PREMARKET", "AFTERMARKET"}:
+        ext_p = sess_info.get("ext_ref_price")
+        ext_gap = sess_info.get("ext_gap_vs_regular_pct")
+        ext_mkt = sess_info.get("ext_market_code") or "통합"
+        if ext_p and int(ext_p) > 0:
+            ext_line = (
+                f"▪ 장외 참고가({ext_mkt}): {int(ext_p):,}원 "
+                f"(정규장 대비 {float(ext_gap or 0.0):+.2f}% | 유동성 주의)\n"
+            )
+
+    entry_band_line = (
+        f"• 정규장 유효 진입 구간: {entry_p:,}원 ~ {max_entry_p:,}원 "
+        f"({max_entry_p:,}원 초과 갭 시 패스)\n"
+        if max_entry_p >= entry_p
+        else f"• 진입 기준가: {entry_p:,}원\n"
+    )
+
     if p4 and p4.get("sl_price"):
         tp_parts = " / ".join(
             f"{t['price']:,}원(+{t['pct']:.0f}%)" for t in (p4.get("tp_levels") or [])
         )
         rr_section = (
-            f"🎯 손익비 · 실측 확정 SL/TP (Phase 4)\n"
-            f"• 진입 기준가: {entry_p:,}원 | 확정 손절: {int(p4['sl_price']):,}원 ({p4['sl_pct']:+.2f}%)\n"
-            f"• 분할 익절(1·2·3차): {tp_parts}\n"
+            f"🎯 손익비 · 실측 확정 SL/TP (Phase 4 · 정규장 기준)\n"
+            f"{entry_band_line}"
+            f"• 확정 손절: {int(p4['sl_price']):,}원 ({p4['sl_pct']:+.2f}%) | 분할 익절: {tp_parts}\n"
             f"• 1차 도달 시 본절 보호 | 예상 R:R = 1 : {proj_rr:.2f} | ATR(14): {atr14_pct:.2f}%"
         )
     else:
         rr_section = (
-            f"📐 손익비 구조 참고 (SL/TP 최종 확정 전 실측 단계)\n"
-            f"• 진입 기준가: {entry_p:,}원\n"
-            f"• 구조적 무효화 참고선(1R): {inval_p:,}원 (-{risk_pct:.2f}%)\n"
+            f"📐 정규장 기준 진입 타점 · 손익비 가이드 (1~3단계 실측)\n"
+            f"{entry_band_line}"
+            f"• 구조적 무효화 기준선(1R): {inval_p:,}원 (-{risk_pct:.2f}%)\n"
             f"• 상단 매물대 공백: {upside_line} | 예상 R:R = 1 : {proj_rr:.2f}\n"
             f"• 14일 ATR: {atr14_pct:.2f}%"
         )
 
     return (
         f"{weak_banner}"
-        f"🚨 [KOSPI 1:3 스윙 포착] {name} ({code})\n"
-        f"▪ 트랙: {track_label} | 장세: {regime_badge}\n"
-        f"▪ 현재가: {entry_p:,}원 ({chg_pct:+.1f}%) | 시총: {marcap_uk:,.0f}억\n"
+        f"{header_badge}\n"
+        f"▪ 트랙: {track_label} | {session_line}\n"
+        f"▪ 정규장 기준가: {entry_p:,}원 ({chg_pct:+.1f}%) | 시총: {marcap_uk:,.0f}억\n"
+        f"{ext_line}"
         f"▪ 거래량: 20일 평균 대비 {vol_ratio:.0f}% | RS(20일): 지수 대비 {rs_20:+.1f}%\n"
         f"▪ 3일 수급: 외인 {frgn_3d:+,}주 / 기관 {orgn_3d:+,}주 (OBV {obv_trend})\n\n"
         f"{rr_section}"

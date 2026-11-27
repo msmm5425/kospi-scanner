@@ -33,9 +33,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def get_dynamic_min_trading_val_krw(now_kst: datetime | None = None) -> int:
     """장중 시간대별 탄력 최소 거래대금 하한(원) 반환.
 
+    - 프리장(08:00~09:00): 직전 정규장 마감 유동성 기준 30억 원
     - 09:00 ~ 10:30: 10억 원
     - 10:30 ~ 13:00: 20억 원
-    - 13:00 이후 (장 마감 분석/리플레이 포함): 30억 원
+    - 13:00 이후 (정규장 후반·애프터장·분석 포함): 30억 원
     """
     if now_kst is None:
         return 3_000_000_000
@@ -45,6 +46,18 @@ def get_dynamic_min_trading_val_krw(now_kst: datetime | None = None) -> int:
     if dt_time(10, 30) <= t < dt_time(13, 0):
         return 2_000_000_000
     return 3_000_000_000
+
+
+def classify_market_session(now_kst: datetime | None = None) -> str:
+    """KST 시각 기준으로 PREMARKET / REGULAR / AFTERMARKET 장 세션을 판별한다."""
+    if now_kst is None:
+        return "REGULAR"
+    t = now_kst.timetz().replace(tzinfo=None)
+    if dt_time(8, 0) <= t < dt_time(9, 0):
+        return "PREMARKET"
+    if dt_time(9, 0) <= t <= dt_time(15, 30):
+        return "REGULAR"
+    return "AFTERMARKET"
 
 
 def _default_data_provider() -> str:
@@ -137,11 +150,13 @@ class Settings:
     heavy_vol_resistance_mult: float = 2.0
     resistance_lookback_days: int = 120
 
-    # 쿨다운 · 오답노트 · 분석
+    # 쿨다운 · 오답노트 · 분석 · 연속 스캔 스케줄 (08:00~21:00)
     cooldown_trading_days: int = 5
     error_tracking_max_days: int = 10
     top20_lookback_trading_days: int = 7
-    scan_schedule_kst: tuple[str, ...] = ("09:30", "10:45", "13:30", "15:10")
+    scan_schedule_kst: tuple[str, ...] = ("08:00-12:25", "12:25-16:50", "16:50-21:00")
+    loop_interval_sec: int = 240
+    premarket_max_gap_over_ceiling_pct: float = 1.5
     analyze_time_kst: str = "15:50"
     weekly_report_time_kst: str = "금 16:30"
 

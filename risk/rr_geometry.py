@@ -41,6 +41,7 @@ def evaluate_rr_geometry(
         "reject_reason": "",
         "failed_reasons": [],
         "entry_price": entry_tick,
+        "max_entry_price": entry_tick,
         "invalidation_ref_price": inval_tick,
         "risk_pct": 0.0,
         "max_risk_pct": max_risk_pct,
@@ -108,6 +109,21 @@ def evaluate_rr_geometry(
 
     projected_rr = round(clear_upside_pct / risk_pct, 2) if risk_pct > 0 else 0.0
 
+    # 정규장 기준 1:3 R:R 및 최대 허용 리스크가 유지되는 추격 허용 상한가 계산
+    target_ceiling = (
+        float(nearest_res)
+        if nearest_res is not None
+        else float(entry_tick) * (1.0 + clear_upside_pct / 100.0)
+    )
+    max_by_risk = float(inval_tick) / max(0.01, 1.0 - (max_risk_pct / 100.0))
+    max_by_rr = (target_ceiling + (eff_min_rr * float(inval_tick))) / (1.0 + eff_min_rr)
+    max_by_upside = target_ceiling / (1.0 + settings.min_clear_upside_pct / 100.0)
+    max_by_chase = float(entry_tick) * 1.03
+    max_entry_price = max(
+        entry_tick,
+        round_to_tick(min(max_by_risk, max_by_rr, max_by_upside, max_by_chase), mode="down"),
+    )
+
     failed: list[str] = []
     if risk_pct > max_risk_pct:
         failed.append(f"진입 지연(손익비 불량: 리스크 {risk_pct:.2f}% > 상한 {max_risk_pct:.1f}%)")
@@ -123,6 +139,7 @@ def evaluate_rr_geometry(
             "passed": len(failed) == 0,
             "reject_reason": failed[0] if failed else "",
             "failed_reasons": failed,
+            "max_entry_price": max_entry_price,
             "nearest_resistance_price": nearest_res,
             "clear_upside_pct": clear_upside_pct,
             "projected_rr": projected_rr,

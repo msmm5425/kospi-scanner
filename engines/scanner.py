@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from datetime import datetime
 from typing import Any
 
-from config.settings import KST, get_dynamic_min_trading_val_krw, settings
+from config.settings import KST, classify_market_session, get_dynamic_min_trading_val_krw, settings
 from indicators.technicals import compute_indicators
 from notify.telegram_bot import TelegramNotifier
 from providers.base import MarketDataProvider
@@ -73,6 +74,7 @@ def _build_signal_record(
     df_ind,
     origin: str = "LIVE",
     learning_profile: dict[str, Any] | None = None,
+    session_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     track_code = track_res["track"]
     suffix = "D" if track_code.startswith("TRACK_D") else _TRACK_SHORT_SUFFIX.get(track_code, "X")
@@ -80,16 +82,20 @@ def _build_signal_record(
 
     last_obv = float(df_ind["obv"].iloc[-1])
     last_obv_ma5 = float(df_ind["obv_ma5"].iloc[-1])
+    sess = dict(session_info or {"session": "REGULAR"})
 
     record: dict[str, Any] = {
         "signal_id": sig_id,
         "signal_date": signal_date,
         "origin": origin,
+        "session": str(sess.get("session") or "REGULAR"),
         "code": code,
         "name": name,
         "track": track_code,
         "track_label": track_res.get("track_label", track_code),
         "entry_price": rr_res["entry_price"],
+        "max_entry_price": rr_res.get("max_entry_price", rr_res["entry_price"]),
+        "session_info": sess,
         "rr_geometry": {
             "invalidation_ref_price": rr_res["invalidation_ref_price"],
             "risk_pct": rr_res["risk_pct"],
@@ -97,6 +103,7 @@ def _build_signal_record(
             "clear_upside_pct": rr_res["clear_upside_pct"],
             "projected_rr": rr_res["projected_rr"],
             "is_blue_sky": bool(rr_res.get("is_blue_sky", False)),
+            "max_entry_price": rr_res.get("max_entry_price", rr_res["entry_price"]),
         },
         "snapshot": {
             "chg_pct": gate_res["metrics"]["chg_pct"],
@@ -161,12 +168,16 @@ def run_scan(
     send_notifications: bool = True,
     origin: str = "LIVE",
     learning_profile_override: dict[str, Any] | None = None,
+    session_override: str | None = None,
 ) -> dict[str, Any]:
-    """장중 코스피 1:3 스윙 스캔 실행: 유니버스 -> 안전필터 -> 공통관문 -> Track A/B/C/D -> R:R 검증."""
+    """장전/정규장/장후 코스피 1:3 스윙 스캔 실행 (프리·애프터장도 정규장 기준 타점 산출)."""
     t_start = time.time()
     store = storage or default_repo
     bot = notifier or TelegramNotifier(dry_run=dry_run)
     eff_now = now_kst or datetime.now(tz=KST)
+    today_kst = eff_now.strftime("%Y-%m-%d")
+    session_type = (session_override or classify_market_session(eff_now)).upper()
+
     learning_profile = learning_profile_override or store.load_learning_profile()
     adaptive = learning_profile.get("adaptive_params") or {}
     promoted_track_d = learning_profile.get("promoted_track_d_patterns") or []
@@ -178,7 +189,13 @@ def run_scan(
 
     index_df = provider.get_index_ohlcv(bars=settings.index_bars)
     trading_dates = index_df["date"].astype(str).tolist() if not index_df.empty else []
-    signal_date = trading_dates[-1] if trading_dates else eff_now.strftime("%Y-%m-%d")
+    # 프리장은 당일 정규장 개장 전이므로 오늘 날짜로 시그널 ID·쿨다운 관리 (전략 평가는 T-1 정규장 일봉 기준)
+    if session_type == "PREMARKET":
+        signal_date = today_kst
+        if signal_date not in trading_dates:
+            trading_dates = [*trading_dates, signal_date]
+    else:
+        signal_date = trading_dates[-1] if trading_dates else today_kst
 
     universe = provider.get_universe()
     stats: dict[str, int] = {
@@ -206,7 +223,7 @@ def run_scan(
         if u_tval > 0 and u_tval < (eff_min_tval * 0.5):
             stats["pre_filtered_out"] += 1
             continue
-        if u_chg != 0.0 and (u_chg < -1.0 or u_chg > (settings.max_chg_pct + 1.0)):
+        if session_type == "REGULAR" and u_chg != 0.0 and (u_chg < -1.0 or u_chg > (settings.max_chg_pct + 1.0)):
             stats["pre_filtered_out"] += 1
             continue
 
@@ -227,30 +244,46 @@ def run_scan(
             logger.debug("Safety skip %s (%s): %s", name, code, safety.get("reject_reason"))
             continue
 
-        live_tval = float(safety.get("trading_val") or u_tval)
-        live_price = float(safety.get("price") or item.get("price") or 0.0)
-
         df_raw = provider.get_daily_ohlcv(code, bars=settings.ohlcv_bars)
-        if not df_raw.empty and str(df_raw["date"].iloc[-1]) == signal_date and live_price > 0:
-            last_i = df_raw.index[-1]
-            df_raw.loc[last_i, "close"] = live_price
-            df_raw.loc[last_i, "high"] = max(float(df_raw.loc[last_i, "high"]), live_price)
-            low_curr = float(df_raw.loc[last_i, "low"])
-            df_raw.loc[last_i, "low"] = min(low_curr, live_price) if low_curr > 0 else live_price
-            if live_tval > 0:
-                df_raw.loc[last_i, "amount"] = live_tval
+        if session_type == "PREMARKET" and not df_raw.empty:
+            # 프리장은 직전 완료 정규장(T-1) 일봉만으로 전략·타점 검증
+            df_raw = df_raw[df_raw["date"] < today_kst].reset_index(drop=True)
+
+        if session_type == "REGULAR" and not df_raw.empty:
+            live_tval = float(safety.get("trading_val") or u_tval)
+            live_price = float(safety.get("price") or item.get("price") or 0.0)
+            if str(df_raw["date"].iloc[-1]) == signal_date and live_price > 0:
+                last_i = df_raw.index[-1]
+                df_raw.loc[last_i, "close"] = live_price
+                df_raw.loc[last_i, "high"] = max(float(df_raw.loc[last_i, "high"]), live_price)
+                low_curr = float(df_raw.loc[last_i, "low"])
+                df_raw.loc[last_i, "low"] = min(low_curr, live_price) if low_curr > 0 else live_price
+                if live_tval > 0:
+                    df_raw.loc[last_i, "amount"] = live_tval
+        else:
+            live_tval = float(df_raw["amount"].iloc[-1]) if not df_raw.empty else u_tval
+            live_price = float(df_raw["close"].iloc[-1]) if not df_raw.empty else float(safety.get("price") or 0.0)
 
         df_ind = compute_indicators(df_raw)
         if df_ind.empty or len(df_ind) < 25:
             stats["gate_rejected"] += 1
             continue
 
-        # 일봉 마지막 날짜가 signal_date와 맞고 실시간 현재가가 있으면 종가/등락 보정
-        entry_price = live_price if live_price > 0 else float(df_ind["close"].iloc[-1])
+        # 프리장/애프터장에서도 entry_price 및 모든 기술 지표는 정규장 일봉 기준 고정
+        entry_price = (
+            live_price
+            if (session_type == "REGULAR" and live_price > 0)
+            else float(df_ind["close"].iloc[-1])
+        )
+        eval_tval = (
+            live_tval
+            if (session_type == "REGULAR" and live_tval > 0)
+            else float(df_ind["amount"].iloc[-1])
+        )
         gate_res = evaluate_common_gate(
             df=df_ind,
             index_df=index_df,
-            trading_val=live_tval,
+            trading_val=eval_tval,
             marcap_krw=marcap,
             now_kst=eff_now,
             min_trading_val_override=min_trading_val_override,
@@ -306,6 +339,48 @@ def run_scan(
             )
             continue
 
+        session_info: dict[str, Any] = {
+            "session": session_type,
+            "captured_time_kst": eff_now.strftime("%H:%M KST"),
+            "regular_ref_date": str(df_ind["date"].iloc[-1]),
+            "regular_entry_price": rr_res["entry_price"],
+            "max_entry_price": rr_res["max_entry_price"],
+            "ext_ref_price": None,
+            "ext_gap_vs_regular_pct": None,
+            "ext_market_code": None,
+        }
+        if session_type in {"PREMARKET", "AFTERMARKET"}:
+            ext_q = provider.get_session_quote(code, session=session_type)
+            if ext_q and float(ext_q.get("price") or 0) > 0:
+                ext_p = float(ext_q["price"])
+                reg_p = float(rr_res["entry_price"])
+                gap_vs_reg = round(((ext_p - reg_p) / reg_p) * 100.0, 2) if reg_p > 0 else 0.0
+                session_info.update(
+                    {
+                        "ext_ref_price": int(round(ext_p)),
+                        "ext_gap_vs_regular_pct": gap_vs_reg,
+                        "ext_market_code": ext_q.get("market_code"),
+                    }
+                )
+                max_p = float(rr_res["max_entry_price"])
+                # 프리장에서 이미 정규장 1:3 R:R 추격 상한선 이상 과도 갭상승한 경우 사전 배제
+                if session_type == "PREMARKET" and ext_p > max_p * (
+                    1.0 + settings.premarket_max_gap_over_ceiling_pct / 100.0
+                ):
+                    stats["rr_rejected"] += 1
+                    rr_rejections.append(
+                        {
+                            "code": code,
+                            "name": name,
+                            "track": passed_track["track"],
+                            "reason": f"프리장 갭과열 ({int(ext_p):,}원 > 정규장 상한 {int(max_p):,}원)",
+                            "risk_pct": rr_res["risk_pct"],
+                            "clear_upside_pct": rr_res["clear_upside_pct"],
+                            "projected_rr": rr_res["projected_rr"],
+                        }
+                    )
+                    continue
+
         stats["matched_count"] += 1
         sig = _build_signal_record(
             signal_date=signal_date,
@@ -318,6 +393,7 @@ def run_scan(
             df_ind=df_ind,
             origin=origin,
             learning_profile=learning_profile,
+            session_info=session_info,
         )
         captured_signals.append(sig)
 
@@ -330,9 +406,222 @@ def run_scan(
     captured_signals.sort(key=lambda s: s["rr_geometry"]["projected_rr"], reverse=True)
     return {
         "signal_date": signal_date,
+        "session": session_type,
         "provider": provider.provider_name,
         "stats": stats,
         "signals": captured_signals,
         "rr_rejections": rr_rejections,
         "elapsed_sec": round(time.time() - t_start, 2),
+    }
+
+
+class _LoopSessionCacheProvider(MarketDataProvider):
+    """--loop 연속 스캔 중 과거 150일 일봉·확정수급·지수를 캐시해 API 한도·속도를 최적화하는 래퍼."""
+
+    def __init__(self, inner: MarketDataProvider):
+        self._inner = inner
+        self.provider_name = inner.provider_name
+        self._last_session = ""
+        self._last_date = ""
+        self._index_cache: tuple[float, Any] | None = None
+        self._ohlcv_cache: dict[str, tuple[float, Any]] = {}
+        self._supply_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    def _maybe_reset_on_transition(self, eff_now: datetime) -> None:
+        curr_date = eff_now.strftime("%Y-%m-%d")
+        curr_sess = classify_market_session(eff_now)
+        if curr_date != self._last_date or curr_sess != self._last_session:
+            self._index_cache = None
+            self._ohlcv_cache.clear()
+            self._supply_cache.clear()
+            self._last_date = curr_date
+            self._last_session = curr_sess
+
+    def _ttl(self) -> float:
+        return 900.0 if self._last_session == "REGULAR" else 3600.0
+
+    def get_universe(self, min_cap=None, max_cap=None):
+        return self._inner.get_universe(min_cap=min_cap, max_cap=max_cap)
+
+    def get_safety_status(self, code: str):
+        return self._inner.get_safety_status(code)
+
+    def get_daily_ohlcv(self, code: str, bars: int = 150, end_date: str | None = None):
+        now_ts = time.time()
+        cached = self._ohlcv_cache.get(code)
+        if cached and (now_ts - cached[0]) < self._ttl():
+            return cached[1].copy()
+        df = self._inner.get_daily_ohlcv(code, bars=bars, end_date=end_date)
+        self._ohlcv_cache[code] = (now_ts, df)
+        return df.copy()
+
+    def get_investor_supply(self, code: str, days: int = 5, end_date: str | None = None):
+        now_ts = time.time()
+        cached = self._supply_cache.get(code)
+        if cached and (now_ts - cached[0]) < max(self._ttl(), 1800.0):
+            return dict(cached[1])
+        sup = self._inner.get_investor_supply(code, days=days, end_date=end_date)
+        self._supply_cache[code] = (now_ts, sup)
+        return dict(sup)
+
+    def get_index_ohlcv(self, bars: int = 100, end_date: str | None = None):
+        now_ts = time.time()
+        if self._index_cache and (now_ts - self._index_cache[0]) < 300.0:
+            return self._index_cache[1].copy()
+        df = self._inner.get_index_ohlcv(bars=bars, end_date=end_date)
+        self._index_cache = (now_ts, df)
+        return df.copy()
+
+    def get_top_gainers(self, top_n: int = 20, end_date: str | None = None):
+        return self._inner.get_top_gainers(top_n=top_n, end_date=end_date)
+
+    def get_sector_map(self):
+        return self._inner.get_sector_map()
+
+    def is_trading_day(self, date_str: str | None = None) -> bool:
+        return self._inner.is_trading_day(date_str)
+
+    def get_session_quote(self, code: str, session: str = "REGULAR"):
+        return self._inner.get_session_quote(code, session=session)
+
+
+def _git_sync_pull() -> None:
+    try:
+        subprocess.run(
+            ["git", "pull", "--rebase", "--autostash", "origin", "main"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception as e:
+        logger.debug("git pull rebase skipped: %s", e)
+
+
+def _git_sync_commit_signals(store: StorageRepo, new_signals: list[dict[str, Any]]) -> None:
+    """신규 포착 시그널을 즉시 Git에 커밋·푸시하고, 15:50 분석과 경합 시 안전 병합한다."""
+    if not new_signals:
+        return
+    try:
+        subprocess.run(["git", "add", str(store.signals_path)], check=False, timeout=15)
+        diff = subprocess.run(["git", "diff", "--cached", "--quiet"], check=False, timeout=15)
+        if diff.returncode == 0:
+            return
+        subprocess.run(
+            ["git", "commit", "-m", "chore(data): update signals_log [skip ci]"],
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
+        for _ in range(3):
+            pull = subprocess.run(
+                ["git", "pull", "--rebase", "origin", "main"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if pull.returncode != 0:
+                subprocess.run(["git", "rebase", "--abort"], check=False, timeout=15)
+                subprocess.run(["git", "fetch", "origin", "main"], check=False, timeout=20)
+                subprocess.run(["git", "reset", "--hard", "origin/main"], check=False, timeout=20)
+                for sig in new_signals:
+                    store.upsert_signal(sig)
+                subprocess.run(["git", "add", str(store.signals_path)], check=False, timeout=15)
+                subprocess.run(
+                    ["git", "commit", "-m", "chore(data): merge signals_log [skip ci]"],
+                    check=False,
+                    capture_output=True,
+                    timeout=15,
+                )
+            push = subprocess.run(
+                ["git", "push", "origin", "HEAD:main"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if push.returncode == 0:
+                return
+            time.sleep(2.0)
+    except Exception as e:
+        logger.warning("git sync signals failed cleanly: %s", e)
+
+
+def run_loop_mode(
+    provider: MarketDataProvider,
+    storage: StorageRepo | None = None,
+    notifier: TelegramNotifier | None = None,
+    interval_sec: int = 240,
+    max_minutes: int = 260,
+    end_kst: str = "21:05",
+    dry_run: bool = False,
+    send_notifications: bool = True,
+    git_sync: bool = False,
+    force: bool = False,
+    max_iterations: int | None = None,
+) -> dict[str, Any]:
+    """08:00~21:00 연속 루프 실행 (공휴일 조기 종료, 캐시 재사용, 자동 Git 동기화)."""
+    store = storage or default_repo
+    bot = notifier or TelegramNotifier(dry_run=dry_run)
+    cached_provider = _LoopSessionCacheProvider(provider)
+
+    start_wall = time.time()
+    max_budget_sec = max(10.0, float(max_minutes) * 60.0)
+    end_h, end_m = [int(x) for x in end_kst.split(":", 1)]
+
+    now_init = datetime.now(tz=KST)
+    if not force and not cached_provider.is_trading_day(now_init.strftime("%Y-%m-%d")):
+        print(f"[LOOP 종료] {now_init.strftime('%Y-%m-%d')}은(는) KRX 휴장일입니다.")
+        return {"cycles": 0, "total_new_signals": 0, "skipped_holiday": True}
+
+    cycles = 0
+    total_new = 0
+    while True:
+        now_kst = datetime.now(tz=KST)
+        if not force and (now_kst.hour > end_h or (now_kst.hour == end_h and now_kst.minute >= end_m)):
+            print(f"[LOOP 종료] 종료 시각({end_kst} KST) 도달.")
+            break
+        if (time.time() - start_wall) >= max_budget_sec:
+            print(f"[LOOP 종료] 세션 실행 예산({max_minutes}분) 도달 — 다음 릴레이에 인계.")
+            break
+        if max_iterations is not None and cycles >= max_iterations:
+            break
+
+        if git_sync:
+            _git_sync_pull()
+
+        cached_provider._maybe_reset_on_transition(now_kst)
+        res = run_scan(
+            provider=cached_provider,
+            storage=store,
+            notifier=bot,
+            now_kst=now_kst,
+            dry_run=dry_run,
+            send_notifications=send_notifications,
+        )
+        cycles += 1
+        new_cnt = int(res["stats"]["new_signals_saved"])
+        total_new += new_cnt
+        print(
+            f"[LOOP #{cycles}] {now_kst.strftime('%H:%M:%S KST')} ({res['session']}) | "
+            f"matched={res['stats']['matched_count']} new={new_cnt} ({res['elapsed_sec']}s)"
+        )
+
+        if git_sync and new_cnt > 0 and not dry_run:
+            _git_sync_commit_signals(store, res["signals"])
+
+        if max_iterations is not None and cycles >= max_iterations:
+            break
+        remaining = max_budget_sec - (time.time() - start_wall)
+        if remaining <= 0:
+            break
+        sleep_for = min(float(interval_sec), max(0.0, remaining - 2.0))
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
+    return {
+        "cycles": cycles,
+        "total_new_signals": total_new,
+        "skipped_holiday": False,
     }

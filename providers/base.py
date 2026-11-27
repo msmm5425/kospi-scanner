@@ -112,3 +112,18 @@ class MarketDataProvider(ABC):
     def get_sector_map(self) -> dict[str, str]:
         """선택적 업종 매핑 {code: sector} 반환 (미지원 프로바이더는 빈 dict)."""
         return {}
+
+    def is_trading_day(self, date_str: str | None = None) -> bool:
+        """해당 날짜가 KRX 주식시장 개장일인지 여부 반환 (주말 제외 기본 True)."""
+        from datetime import datetime
+        from config.settings import KST
+
+        eff = date_str or datetime.now(tz=KST).strftime("%Y-%m-%d")
+        try:
+            return datetime.strptime(eff[:10], "%Y-%m-%d").weekday() < 5
+        except ValueError:
+            return True
+
+    def get_session_quote(self, code: str, session: str = "REGULAR") -> dict[str, Any] | None:
+        """프리장/애프터장(통합 UN) 또는 정규장(J) 참고 시세 조회 (미지원 시 None)."""
+        return None

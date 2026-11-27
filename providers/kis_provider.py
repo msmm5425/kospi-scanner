@@ -50,6 +50,7 @@ class KISProvider(MarketDataProvider):
         self._token_cache_file = Path(tempfile.gettempdir()) / "kospi_scanner_kis_token.json"
         self._universe_cache: dict[str, list[dict[str, Any]]] = {}
         self._marcap_map_cache: dict[str, int] = {}
+        self._holiday_cache: dict[str, bool] = {}
 
     def _require_credentials(self) -> None:
         if not self.app_key or not self.app_secret:
@@ -483,3 +484,63 @@ class KISProvider(MarketDataProvider):
             )
         out.sort(key=lambda x: x["chg_pct"], reverse=True)
         return out[: max(1, int(top_n))]
+
+    def is_trading_day(self, date_str: str | None = None) -> bool:
+        """KIS CTCA0903R 국내휴일여부조회를 사용해 KRX 공휴일/개장일 여부를 판별한다."""
+        eff_iso = (date_str or datetime.now(tz=KST).strftime("%Y-%m-%d"))[:10]
+        eff_ymd = eff_iso.replace("-", "")
+        try:
+            if datetime.strptime(eff_ymd, "%Y%m%d").weekday() >= 5:
+                return False
+        except ValueError:
+            return True
+
+        with self._lock:
+            if eff_ymd in self._holiday_cache:
+                return self._holiday_cache[eff_ymd]
+
+        try:
+            payload = self._request_get(
+                "/uapi/domestic-stock/v1/quotations/chk-holiday",
+                "CTCA0903R",
+                {"BASS_DT": eff_ymd, "CTX_AREA_NK": "", "CTX_AREA_FK": ""},
+            )
+            rows = payload.get("output") or []
+            with self._lock:
+                for r in rows:
+                    dt_val = str(r.get("bass_dt") or "").strip()
+                    opnd = str(r.get("opnd_yn") or "").upper() == "Y"
+                    if len(dt_val) == 8:
+                        self._holiday_cache[dt_val] = opnd
+                if eff_ymd in self._holiday_cache:
+                    return self._holiday_cache[eff_ymd]
+        except Exception as e:
+            logger.warning("KIS chk-holiday 조회 실패(%s): %s", eff_ymd, e)
+
+        return True
+
+    def get_session_quote(self, code: str, session: str = "REGULAR") -> dict[str, Any] | None:
+        """프리/애프터장(통합시세 UN -> KRX J 폴백) 또는 정규장(J) 참고 시세를 조회한다."""
+        norm_code = str(code).zfill(6)
+        sess = str(session or "REGULAR").upper()
+        codes_to_try = ("UN", "J") if sess in {"PREMARKET", "AFTERMARKET"} else ("J",)
+
+        for mkt_cd in codes_to_try:
+            try:
+                payload = self._request_get(
+                    "/uapi/domestic-stock/v1/quotations/inquire-price",
+                    "FHKST01010100",
+                    {"FID_COND_MRKT_DIV_CODE": mkt_cd, "FID_INPUT_ISCD": norm_code},
+                )
+                out = payload.get("output") or {}
+                price = float(out.get("stck_prpr") or 0)
+                if price > 0:
+                    return {
+                        "price": price,
+                        "chg_pct": float(out.get("prdy_ctrt") or 0),
+                        "trading_val": float(out.get("acml_tr_pbmn") or 0),
+                        "market_code": mkt_cd,
+                    }
+            except Exception as e:
+                logger.debug("KIS get_session_quote (%s, %s) failed: %s", norm_code, mkt_cd, e)
+        return None

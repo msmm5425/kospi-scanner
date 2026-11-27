@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 
 from config.settings import KST, settings
-from engines.scanner import run_scan
+from engines.scanner import run_loop_mode, run_scan
 from notify.telegram_bot import TelegramNotifier
 from providers.factory import create_provider
 
@@ -21,12 +21,17 @@ def _configure_logging(verbose: bool = False) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="KOSPI 1:3 스윙 스캐너 장중 스캔 실행")
+    parser = argparse.ArgumentParser(description="KOSPI 1:3 스윙 스캐너 08:00~21:00 스캔 실행")
     parser.add_argument("--provider", choices=["pykrx", "kis", "kb"], default=None)
     parser.add_argument("--date", default=None, help="기준 날짜 YYYY-MM-DD (과거 시뮬레이션용)")
     parser.add_argument("--dry-run", action="store_true", help="저장/실제 텔레그램 발송 없이 시뮬레이션")
     parser.add_argument("--no-notify", action="store_true", help="텔레그램 발송 생략")
     parser.add_argument("--force", action="store_true", help="휴장일/비개장일 가드 무시 강제 실행")
+    parser.add_argument("--loop", action="store_true", help="지정 시간 동안 연속 루프 스캔 실행")
+    parser.add_argument("--interval-sec", type=int, default=settings.loop_interval_sec, help="루프 스캔 주기(초)")
+    parser.add_argument("--max-minutes", type=int, default=260, help="루프 세션 최대 실행 시간(분)")
+    parser.add_argument("--end-kst", default="21:05", help="루프 자동 종료 KST 시각 (HH:MM)")
+    parser.add_argument("--git-sync", action="store_true", help="루프 중 신규 포착 시 Git 자동 커밋/푸시")
     parser.add_argument("--verbose", action="store_true", help="상세 로그 출력")
     args = parser.parse_args(argv)
 
@@ -36,11 +41,26 @@ def main(argv: list[str] | None = None) -> int:
 
     today_kst = datetime.now(tz=KST).strftime("%Y-%m-%d")
     if args.date is None and not args.force:
-        idx_df = provider.get_index_ohlcv(bars=5)
-        latest_idx_date = str(idx_df["date"].iloc[-1]) if not idx_df.empty else ""
-        if latest_idx_date != today_kst:
-            print(f"[SCAN 스킵] 오늘은 KRX 휴장일/비개장일입니다 (오늘={today_kst}, 최근 거래일={latest_idx_date}).")
+        if not provider.is_trading_day(today_kst):
+            print(f"[SCAN 스킵] {today_kst}은(는) KRX 휴장일/비개장일입니다.")
             return 0
+
+    if args.loop and args.date is None:
+        loop_res = run_loop_mode(
+            provider=provider,
+            notifier=notifier,
+            interval_sec=args.interval_sec,
+            max_minutes=args.max_minutes,
+            end_kst=args.end_kst,
+            dry_run=args.dry_run,
+            send_notifications=not args.no_notify,
+            git_sync=args.git_sync,
+            force=args.force,
+        )
+        print(
+            f"[LOOP SUMMARY] cycles={loop_res['cycles']} | new_signals={loop_res['total_new_signals']}"
+        )
+        return 0
 
     res = run_scan(
         provider=provider,
@@ -51,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
 
     st = res["stats"]
     print(
-        f"[SCAN 완료] date={res['signal_date']} | provider={res['provider']} | "
+        f"[SCAN 완료] date={res['signal_date']} ({res['session']}) | provider={res['provider']} | "
         f"universe={st['universe_count']} -> matched={st['matched_count']} "
         f"(new={st['new_signals_saved']}, rr_rejected={st['rr_rejected']}) | "
         f"{res['elapsed_sec']}s"
@@ -59,9 +79,9 @@ def main(argv: list[str] | None = None) -> int:
     for sig in res["signals"]:
         rr = sig["rr_geometry"]
         print(
-            f"  - {sig['signal_id']} | {sig['name']}({sig['code']}) | {sig['track']} | "
-            f"진입 {sig['entry_price']:,}원 | 1R -{rr['risk_pct']:.2f}% | "
-            f"여력 +{rr['clear_upside_pct']:.1f}% | R:R 1:{rr['projected_rr']:.2f}"
+            f"  - {sig['signal_id']} | {sig['name']}({sig['code']}) [{sig.get('session')}] | {sig['track']} | "
+            f"정규장 {sig['entry_price']:,}~{sig.get('max_entry_price', sig['entry_price']):,}원 | "
+            f"1R -{rr['risk_pct']:.2f}% | 여력 +{rr['clear_upside_pct']:.1f}% | R:R 1:{rr['projected_rr']:.2f}"
         )
     return 0
 

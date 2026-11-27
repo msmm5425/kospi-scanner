@@ -1,16 +1,22 @@
-name: KOSPI Intraday Swing Scan
+name: KOSPI 08:00-21:00 Continuous Swing Scan
 
 on:
   schedule:
-    # 평일 09:30, 10:45, 13:30, 15:10 KST (UTC = KST - 9h)
-    - cron: "30 0 * * 1-5"
-    - cron: "45 1 * * 1-5"
-    - cron: "30 4 * * 1-5"
-    - cron: "10 6 * * 1-5"
+    # 평일(KST 월~금) 08:00~21:00 무중단 3교대 릴레이 (UTC = KST - 9h)
+    # 1교대: 08:00 KST (전일 23:00 UTC, 일~목 = 0-4) -> ~12:20 KST
+    - cron: "0 23 * * 0-4"
+    # 2교대: 12:25 KST (03:25 UTC, 월~금 = 1-5) -> ~16:45 KST
+    - cron: "25 3 * * 1-5"
+    # 3교대: 16:50 KST (07:50 UTC, 월~금 = 1-5) -> 21:00 KST 종료
+    - cron: "50 7 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
         description: "Dry run without saving state or sending Telegram alerts"
+        required: false
+        default: "false"
+      single_scan:
+        description: "Run single scan instead of loop mode"
         required: false
         default: "false"
 
@@ -18,21 +24,27 @@ permissions:
   contents: write
 
 concurrency:
-  group: kospi-scanner-state
+  group: kospi-scanner-loop
   cancel-in-progress: false
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
       - run: pip install -r requirements.txt
-      - name: Run KOSPI intraday scan
+      - name: Configure Git for live loop sync
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Run KOSPI 08:00-21:00 scanner
         env:
           DATA_PROVIDER: ${{ vars.DATA_PROVIDER }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
@@ -41,19 +53,25 @@ jobs:
           KOSPI_TELEGRAM_TOKEN: ${{ secrets.KOSPI_TELEGRAM_TOKEN }}
           KOSPI_TELEGRAM_CHAT_ID: ${{ secrets.KOSPI_TELEGRAM_CHAT_ID }}
         run: |
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            python main_scan.py --dry-run
+          if [ "${{ github.event.inputs.single_scan }}" = "true" ]; then
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              python main_scan.py --dry-run
+            else
+              python main_scan.py
+            fi
           else
-            python main_scan.py
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              python main_scan.py --loop --interval-sec 240 --max-minutes 260 --end-kst 21:05 --dry-run
+            else
+              python main_scan.py --loop --interval-sec 240 --max-minutes 260 --end-kst 21:05 --git-sync
+            fi
           fi
-      - name: Commit updated signals state
+      - name: Final state sync commit
         if: github.event.inputs.dry_run != 'true'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add storage/data/signals_log.json storage/data/learning_profile.json
           if ! git diff --cached --quiet; then
-            git commit -m "chore(data): update signals_log [skip ci]"
+            git commit -m "chore(data): final scan state sync [skip ci]"
             for i in 1 2 3; do
               git pull --rebase origin main && git push origin HEAD:main && break
               sleep 3

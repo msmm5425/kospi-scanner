@@ -678,3 +678,109 @@ def test_track_d_execution_and_walkforward_bootstrap(tmp_path) -> None:
     boot_res = run_bootstrap_learning(provider=boot_provider, storage=boot_store, lookback_days=15, max_stocks=10)
     assert boot_res["days_replayed"] == 15
     assert boot_res["learning"]["date"] == dates[-1]
+
+
+def test_premarket_aftermarket_regular_anchor_and_loop(tmp_path) -> None:
+    from engines.scanner import run_loop_mode
+
+    dates_t_minus_1 = _trading_dates(160, end="2026-11-26")
+    df_a = _make_track_a_vcp_df(dates_t_minus_1)
+    reg_close = float(df_a.iloc[-1]["close"])
+    sup = {"frgn_today": 10_000, "orgn_today": 15_000, "frgn_3d": 40_000, "orgn_3d": 30_000, "total_5d": 90_000, "pos_days_5d": 4, "intraday_pending": False}
+    uni = [{"code": "100010", "name": "알파테스트", "marcap": 600_000_000_000, "trading_val": float(df_a.iloc[-1]["amount"]), "price": reg_close, "chg_pct": 4.2}]
+
+    # 1. 프리장(08:20 KST): 장외 소폭 +1.0% 상승 시 정규장 종가 기준 타점으로 포착 + 별도 표기 확인
+    p_pre = MockProvider(uni, {"100010": df_a}, {"100010": sup}, _make_index_df(dates_t_minus_1))
+    p_pre.get_session_quote = lambda code, session="REGULAR": {
+        "price": reg_close * 1.01,
+        "chg_pct": 1.0,
+        "trading_val": 5e8,
+        "market_code": "UN",
+    }
+    store_pre = StorageRepo(data_dir=tmp_path / "pre")
+    res_pre = run_scan(
+        provider=p_pre,
+        storage=store_pre,
+        now_kst=datetime(2026, 11, 27, 8, 20, tzinfo=KST),
+        send_notifications=False,
+    )
+    assert len(res_pre["signals"]) == 1
+    sig_pre = res_pre["signals"][0]
+    assert sig_pre["session"] == "PREMARKET"
+    assert sig_pre["signal_date"] == "2026-11-27"
+    assert sig_pre["entry_price"] == round_to_tick(reg_close)
+    assert sig_pre["max_entry_price"] >= sig_pre["entry_price"]
+    assert sig_pre["session_info"]["ext_market_code"] == "UN"
+    msg_pre = format_signal_message(sig_pre)
+    assert "프리장 포착" in msg_pre
+    assert "정규장 유효 진입 구간" in msg_pre
+    assert "장외 참고가(UN)" in msg_pre
+
+    # 2. 프리장 과도 갭상승(+9.0% > max_entry_price 초과) 시 추격 차단 확인
+    p_gap = MockProvider(uni, {"100010": df_a}, {"100010": sup}, _make_index_df(dates_t_minus_1))
+    p_gap.get_session_quote = lambda code, session="REGULAR": {
+        "price": reg_close * 1.09,
+        "chg_pct": 9.0,
+        "trading_val": 8e8,
+        "market_code": "UN",
+    }
+    res_gap = run_scan(
+        provider=p_gap,
+        storage=StorageRepo(data_dir=tmp_path / "pre_gap"),
+        now_kst=datetime(2026, 11, 27, 8, 25, tzinfo=KST),
+        send_notifications=False,
+    )
+    assert len(res_gap["signals"]) == 0
+    assert res_gap["stats"]["rr_rejected"] == 1
+
+    # 3. 애프터장(18:10 KST): 당일 정규장 종가 기준 타점 + 애프터장 별도 표기 확인
+    dates_today = _trading_dates(160, end="2026-11-27")
+    df_today = _make_track_a_vcp_df(dates_today)
+    reg_today_close = float(df_today.iloc[-1]["close"])
+    uni_today = [{"code": "100010", "name": "알파테스트", "marcap": 600_000_000_000, "trading_val": float(df_today.iloc[-1]["amount"]), "price": reg_today_close, "chg_pct": 4.2}]
+    p_aft = MockProvider(uni_today, {"100010": df_today}, {"100010": sup}, _make_index_df(dates_today))
+    p_aft.get_session_quote = lambda code, session="REGULAR": {
+        "price": reg_today_close * 1.005,
+        "chg_pct": 0.5,
+        "trading_val": 3e8,
+        "market_code": "UN",
+    }
+    res_aft = run_scan(
+        provider=p_aft,
+        storage=StorageRepo(data_dir=tmp_path / "aft"),
+        now_kst=datetime(2026, 11, 27, 18, 10, tzinfo=KST),
+        send_notifications=False,
+    )
+    assert len(res_aft["signals"]) == 1
+    assert res_aft["signals"][0]["session"] == "AFTERMARKET"
+    assert res_aft["signals"][0]["entry_price"] == round_to_tick(reg_today_close)
+    assert "애프터장 포착" in format_signal_message(res_aft["signals"][0])
+
+    # 4. 연속 루프 모드(중복 방지 & 휴장일 조기 종료) 검증
+    loop_store = StorageRepo(data_dir=tmp_path / "loop")
+    p_aft.is_trading_day = lambda _d=None: True
+    loop_res = run_loop_mode(
+        provider=p_aft,
+        storage=loop_store,
+        interval_sec=0,
+        max_minutes=1,
+        end_kst="23:59",
+        send_notifications=False,
+        force=True,
+        max_iterations=2,
+    )
+    assert loop_res["cycles"] == 2
+    assert loop_res["total_new_signals"] == 1
+    assert loop_res["skipped_holiday"] is False
+
+    p_aft.is_trading_day = lambda _d=None: False
+    hol_res = run_loop_mode(
+        provider=p_aft,
+        storage=loop_store,
+        interval_sec=0,
+        max_minutes=1,
+        send_notifications=False,
+        force=False,
+    )
+    assert hol_res["skipped_holiday"] is True
+    assert hol_res["cycles"] == 0
