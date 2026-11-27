@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "",
+  "updated_at": "2026-11-27 16:52:17 KST",
   "learning_started_date": "2026-11-27",
   "learning_days": 0,
   "sample_counts": {
@@ -9,7 +9,8 @@
     "live_winners": 0,
     "bootstrap_completed": 0,
     "effective_completed": 0,
-    "effective_winners": 0
+    "effective_winners": 0,
+    "cohort_mode": "LIVE_PLUS_BOOTSTRAP"
   },
   "adaptive_params": {
     "max_upper_wick_ratio": 0.4,
@@ -46,7 +47,19 @@
     ],
     "breakeven_trigger_pct": 10.0
   },
-  "daily_history": [],
+  "daily_history": [
+    {
+      "date": "2026-11-27",
+      "cohort_mode": "LIVE_PLUS_BOOTSTRAP",
+      "effective_completed": 0,
+      "effective_winners": 0,
+      "win_3r_rate": 0.0,
+      "avg_mfe": 0.0,
+      "promoted_track_d": [],
+      "phase4_active": false,
+      "adjustments": []
+    }
+  ],
   "last_adjustments": [],
   "last_closing_briefing_date": ""
 }
