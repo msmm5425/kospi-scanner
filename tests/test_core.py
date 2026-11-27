@@ -887,3 +887,163 @@ def test_closing_briefing_validation_and_ranking(tmp_path) -> None:
         send_notifications=False,
     )
     assert brief2["already_sent"] is True
+
+
+def test_kis_daily_token_encryption_and_reuse(tmp_path, monkeypatch) -> None:
+    from providers.kis_provider import KISProvider
+
+    cache_file = tmp_path / "kis_token.json"
+    monkeypatch.setenv("KIS_TOKEN_CACHE_PATH", str(cache_file))
+
+    issue_calls = 0
+
+    class _FakeResp:
+        status_code = 200
+
+        def __init__(self, payload: dict[str, Any]):
+            self._payload = payload
+
+        def json(self) -> dict[str, Any]:
+            return self._payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeSession:
+        def post(self, url: str, json: dict[str, Any] | None = None, timeout: float = 10.0):
+            nonlocal issue_calls
+            issue_calls += 1
+            return _FakeResp({"access_token": f"TOK_{issue_calls}", "expires_in": 86400})
+
+    p1 = KISProvider()
+    p1.app_key = "APPKEY123456"
+    p1.app_secret = "SUPER_SECRET_KEY"
+    p1._session = _FakeSession()
+
+    res1 = p1.ensure_daily_token(min_ttl_sec=1800.0)
+    assert res1["source"] == "issued"
+    assert res1["access_token"] == "TOK_1"
+    assert issue_calls == 1
+    raw_disk = cache_file.read_text(encoding="utf-8")
+    assert "TOK_1" not in raw_disk  # 암호화 저장 확인
+
+    # 새 KISProvider 인스턴스(다음 워크플로/프로세스)에서 1회 발급 토큰 재사용 확인
+    p2 = KISProvider()
+    p2.app_key = "APPKEY123456"
+    p2.app_secret = "SUPER_SECRET_KEY"
+    p2._session = _FakeSession()
+
+    res2 = p2.ensure_daily_token(min_ttl_sec=48_600.0)
+    assert res2["source"] == "cache"
+    assert res2["access_token"] == "TOK_1"
+    assert issue_calls == 1
+
+
+def test_naver_and_kind_fallbacks(monkeypatch) -> None:
+    from providers.kis_provider import KISProvider
+    from providers.naver_fallback import (
+        fetch_naver_kospi_universe,
+        parse_kind_sector_html,
+        parse_naver_fchart_xml,
+    )
+
+    class _FakeResp:
+        def __init__(self, status_code: int, payload: Any):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self) -> Any:
+            return self._payload
+
+    class _FakeSession:
+        def get(self, url: str, headers=None, timeout: float = 10.0):
+            if "marketValue/KOSPI" in url:
+                if "page=1&" in url:
+                    return _FakeResp(
+                        200,
+                        {
+                            "stocks": [
+                                {
+                                    "itemCode": "005930",
+                                    "stockName": "삼성전자",
+                                    "closePriceRaw": "178100",
+                                    "fluctuationsRatio": "3.97",
+                                    "accumulatedTradingVolumeRaw": "13716654",
+                                    "accumulatedTradingValueRaw": "2414846000000",
+                                    "marketValueRaw": "1041222220084800",
+                                },
+                                {
+                                    "itemCode": "009470",
+                                    "stockName": "삼화전기",
+                                    "closePriceRaw": "28350",
+                                    "fluctuationsRatio": "23.80",
+                                    "accumulatedTradingVolumeRaw": "294361",
+                                    "accumulatedTradingValueRaw": "8094000000",
+                                    "marketValueRaw": "187501797000",
+                                },
+                                {
+                                    "itemCode": "005935",
+                                    "stockName": "삼성전자우",
+                                    "closePriceRaw": "75000",
+                                    "fluctuationsRatio": "1.2",
+                                    "accumulatedTradingVolumeRaw": "100000",
+                                    "accumulatedTradingValueRaw": "7500000000",
+                                    "marketValueRaw": "60000000000000",
+                                },
+                            ]
+                        },
+                    )
+                return _FakeResp(200, {"stocks": []})
+            if "up/KOSPI" in url:
+                return _FakeResp(
+                    200,
+                    {
+                        "stocks": [
+                            {
+                                "itemCode": "009470",
+                                "stockName": "삼화전기",
+                                "closePriceRaw": "28350",
+                                "fluctuationsRatio": "23.80",
+                                "accumulatedTradingVolumeRaw": "294361",
+                                "accumulatedTradingValueRaw": "8094000000",
+                                "marketValueRaw": "187501797000",
+                                "tradeStopType": {"name": "TRADING"},
+                            }
+                        ]
+                    },
+                )
+            return _FakeResp(404, {})
+
+    uni = fetch_naver_kospi_universe(session=_FakeSession())
+    assert len(uni) == 1  # 삼성전자는 >5조 제외, 삼성전자우는 우선주 제외, 삼화전기 통과
+    assert uni[0]["code"] == "009470"
+
+    # KIS ranking/fluctuation 실패 시 Naver TOP 20 자동 폴백 확인
+    kis = KISProvider()
+    kis.app_key = "TEST_KEY"
+    kis.app_secret = "TEST_SEC"
+    kis._session = _FakeSession()
+    kis._request_get = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("HTTP 500"))
+    top = kis.get_top_gainers(top_n=10)
+    assert len(top) == 1
+    assert top[0]["code"] == "009470"
+    assert top[0]["chg_pct"] == 23.8
+
+    # fchart XML 파싱 (종목 + KOSPI 지수)
+    xml_stock = """<?xml version="1.0" encoding="EUC-KR"?>
+    <protocol><chartdata symbol="005930">
+      <item data="20261126|172900|176700|170700|171500|13966982" />
+      <item data="20261127|171200|179900|169000|178000|13717008" />
+    </chartdata></protocol>"""
+    df_s = parse_naver_fchart_xml(xml_stock, bars=10, is_index=False)
+    assert list(df_s["date"]) == ["2026-11-26", "2026-11-27"]
+    assert float(df_s.iloc[-1]["close"]) == 178000.0
+
+    # KIND 업종 HTML 파싱
+    kind_html = """<table>
+      <tr><th>회사명</th><th>시장구분</th><th>종목코드</th><th>업종</th></tr>
+      <tr><td>삼성전자</td><td>유가</td><td>005930</td><td>통신 및 방송 장비 제조업</td></tr>
+      <tr><td>이상특수</td><td>유가</td><td>0220W0</td><td>기타</td></tr>
+    </table>"""
+    sec_map = parse_kind_sector_html(kind_html)
+    assert sec_map == {"005930": "통신 및 방송 장비 제조업"}

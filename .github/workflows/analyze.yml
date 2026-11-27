@@ -29,12 +29,35 @@ jobs:
           python-version: "3.11"
           cache: "pip"
       - run: pip install -r requirements.txt
+      - name: Restore cached KIS access token
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/kospi_token_cache
+          key: kis-token-v1-none
+          restore-keys: |
+            kis-token-v1-
+      - name: Ensure 1-day KIS access token
+        id: kis_token
+        env:
+          DATA_PROVIDER: ${{ vars.DATA_PROVIDER }}
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          KIS_API_BASE_URL: ${{ vars.KIS_API_BASE_URL || 'https://openapi.koreainvestment.com:9443' }}
+          KIS_TOKEN_CACHE_PATH: ${{ runner.temp }}/kospi_token_cache/kis_token.json
+        run: python main_token.py --min-ttl-hours 0.5 --github-output
+      - name: Save KIS access token cache
+        if: steps.kis_token.outputs.needs_save == 'true' && steps.kis_token.outputs.cache_key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/kospi_token_cache
+          key: ${{ steps.kis_token.outputs.cache_key }}
       - name: Run 15:50 error log + TOP20 reverse analysis
         env:
           DATA_PROVIDER: ${{ vars.DATA_PROVIDER }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           KIS_API_BASE_URL: ${{ vars.KIS_API_BASE_URL || 'https://openapi.koreainvestment.com:9443' }}
+          KIS_TOKEN_CACHE_PATH: ${{ runner.temp }}/kospi_token_cache/kis_token.json
           KOSPI_TELEGRAM_TOKEN: ${{ secrets.KOSPI_TELEGRAM_TOKEN }}
           KOSPI_TELEGRAM_CHAT_ID: ${{ secrets.KOSPI_TELEGRAM_CHAT_ID }}
         run: |

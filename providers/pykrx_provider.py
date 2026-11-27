@@ -12,6 +12,13 @@ import requests
 
 from config.settings import KST, settings
 from .base import MarketDataProvider, is_eligible_common_stock
+from .naver_fallback import (
+    fetch_kind_sector_map,
+    fetch_naver_fchart_ohlcv,
+    fetch_naver_index_ohlcv,
+    fetch_naver_kospi_universe,
+    fetch_naver_top_gainers,
+)
 
 try:
     from pykrx import stock as pykrx_stock
@@ -163,6 +170,13 @@ class PyKRXProvider(MarketDataProvider):
             except Exception as e:
                 logger.debug("FDR KS11 trading-day lookup failed: %s", e)
 
+        try:
+            naver_idx = fetch_naver_index_ohlcv(bars=15, end_date=anchor_dt.strftime("%Y-%m-%d"))
+            if not naver_idx.empty:
+                return str(naver_idx["date"].iloc[-1])
+        except Exception as e:
+            logger.debug("Naver fchart KS11 trading-day lookup failed: %s", e)
+
         # 최후 폴백: 평일 보정
         d = anchor_dt
         while d.weekday() >= 5:
@@ -288,6 +302,30 @@ class PyKRXProvider(MarketDataProvider):
                         )
             except Exception as e:
                 logger.warning("FDR StockListing fallback failed: %s", e)
+
+        if not rows and not self.as_of_date:
+            try:
+                naver_items = fetch_naver_kospi_universe(min_cap=0, max_cap=10_000_000_000_000_000)
+                for item in naver_items:
+                    close_p = float(item.get("price") or 0.0)
+                    tval = float(item.get("trading_val") or 0.0)
+                    vol = (tval / close_p) if (close_p > 0 and tval > 0) else 0.0
+                    rows.append(
+                        {
+                            "code": item["code"],
+                            "name": item["name"],
+                            "open": close_p,
+                            "high": close_p,
+                            "low": close_p,
+                            "close": close_p,
+                            "volume": vol,
+                            "trading_val": tval,
+                            "chg_pct": float(item.get("chg_pct") or 0.0),
+                            "marcap": float(item.get("marcap") or 0.0),
+                        }
+                    )
+            except Exception as e:
+                logger.warning("Naver KOSPI snapshot fallback failed: %s", e)
 
         snap_df = pd.DataFrame(rows)
         with self._lock:
@@ -469,6 +507,8 @@ class PyKRXProvider(MarketDataProvider):
                 logger.debug("FDR OHLCV (%s) failed: %s", norm_code, e)
 
         norm = _normalize_ohlcv_df(raw_df)
+        if norm.empty:
+            norm = fetch_naver_fchart_ohlcv(norm_code, bars=bars, end_date=eff_end)
         if not norm.empty:
             # 과거 거래정지일(open==0, close>0) 시가·고가·저가를 종가로 보정하여 지표 NaN 방지
             halted_bars = (norm["open"] <= 0) & (norm["close"] > 0)
@@ -595,7 +635,11 @@ class PyKRXProvider(MarketDataProvider):
                 logger.debug("FDR KS11 index failed: %s", e)
 
         if raw is None or raw.empty:
-            return pd.DataFrame(columns=cols)
+            naver_idx = fetch_naver_index_ohlcv(bars=bars, end_date=eff_end)
+            if not naver_idx.empty:
+                with self._lock:
+                    self._index_cache[eff_end] = naver_idx
+            return naver_idx
 
         work = raw.reset_index().copy()
         date_col = next((c for c in ("날짜", "Date", "index") if c in work.columns), work.columns[0])
@@ -621,6 +665,11 @@ class PyKRXProvider(MarketDataProvider):
         eff_end = self._effective_end_date(end_date)
         snap = self._get_market_snapshot(eff_end)
         if snap.empty:
+            if not end_date and not self.as_of_date:
+                return fetch_naver_top_gainers(
+                    top_n=top_n,
+                    min_trading_val=settings.top20_min_trading_val_krw,
+                )
             return []
 
         risk_map = self._get_krx_risk_codes()
@@ -675,6 +724,9 @@ class PyKRXProvider(MarketDataProvider):
                             mapping[code] = sec
             except Exception as e:
                 logger.debug("FDR sector map load failed: %s", e)
+
+        if not mapping:
+            mapping = fetch_kind_sector_map()
 
         with self._lock:
             self._sector_map_cache = mapping

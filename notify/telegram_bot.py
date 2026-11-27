@@ -360,6 +360,9 @@ class TelegramNotifier:
                 time.sleep(1.0)
             if not sent:
                 ok_all = False
+        if not ok_all:
+            logger.error("Telegram 메시지 전송에 최종 실패했습니다 (chat_id=%s).", self.chat_id)
+            print(f"[Telegram 전송 실패] 메시지 발송 실패 (토큰/채팅ID 및 네트워크 상태를 확인하세요, chat_id={self.chat_id})")
         return ok_all
 
     def send_signal_alert(self, signal: dict[str, Any]) -> bool:

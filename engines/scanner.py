@@ -611,6 +611,7 @@ def run_loop_mode(
         total_new += new_cnt
         print(
             f"[LOOP #{cycles}] {now_kst.strftime('%H:%M:%S KST')} ({res['session']}) | "
+            f"provider={res['provider']} universe={res['stats']['universe_count']} | "
             f"matched={res['stats']['matched_count']} new={new_cnt} ({res['elapsed_sec']}s)"
         )
 
