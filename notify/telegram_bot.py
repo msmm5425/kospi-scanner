@@ -46,6 +46,26 @@ def format_signal_message(signal: dict[str, Any]) -> str:
     else:
         upside_line = f"{int(round(float(nearest_res))):,}원 (+{clear_up:.1f}%)"
 
+    p4 = signal.get("phase4_sl_tp")
+    if p4 and p4.get("sl_price"):
+        tp_parts = " / ".join(
+            f"{t['price']:,}원(+{t['pct']:.0f}%)" for t in (p4.get("tp_levels") or [])
+        )
+        rr_section = (
+            f"🎯 손익비 · 실측 확정 SL/TP (Phase 4)\n"
+            f"• 진입 기준가: {entry_p:,}원 | 확정 손절: {int(p4['sl_price']):,}원 ({p4['sl_pct']:+.2f}%)\n"
+            f"• 분할 익절(1·2·3차): {tp_parts}\n"
+            f"• 1차 도달 시 본절 보호 | 예상 R:R = 1 : {proj_rr:.2f} | ATR(14): {atr14_pct:.2f}%"
+        )
+    else:
+        rr_section = (
+            f"📐 손익비 구조 참고 (SL/TP 최종 확정 전 실측 단계)\n"
+            f"• 진입 기준가: {entry_p:,}원\n"
+            f"• 구조적 무효화 참고선(1R): {inval_p:,}원 (-{risk_pct:.2f}%)\n"
+            f"• 상단 매물대 공백: {upside_line} | 예상 R:R = 1 : {proj_rr:.2f}\n"
+            f"• 14일 ATR: {atr14_pct:.2f}%"
+        )
+
     return (
         f"{weak_banner}"
         f"🚨 [KOSPI 1:3 스윙 포착] {name} ({code})\n"
@@ -53,19 +73,16 @@ def format_signal_message(signal: dict[str, Any]) -> str:
         f"▪ 현재가: {entry_p:,}원 ({chg_pct:+.1f}%) | 시총: {marcap_uk:,.0f}억\n"
         f"▪ 거래량: 20일 평균 대비 {vol_ratio:.0f}% | RS(20일): 지수 대비 {rs_20:+.1f}%\n"
         f"▪ 3일 수급: 외인 {frgn_3d:+,}주 / 기관 {orgn_3d:+,}주 (OBV {obv_trend})\n\n"
-        f"📐 손익비 구조 참고 (SL/TP 최종 확정 전 실측 단계)\n"
-        f"• 진입 기준가: {entry_p:,}원\n"
-        f"• 구조적 무효화 참고선(1R): {inval_p:,}원 (-{risk_pct:.2f}%)\n"
-        f"• 상단 매물대 공백: {upside_line} | 예상 R:R = 1 : {proj_rr:.2f}\n"
-        f"• 14일 ATR: {atr14_pct:.2f}%"
+        f"{rr_section}"
     )
 
 
 def format_top20_analysis_message(
     error_result: dict[str, Any],
     top20_result: dict[str, Any],
+    learning_result: dict[str, Any] | None = None,
 ) -> str:
-    """15:50 장 마감 오답노트 + TOP 20 역추적 브리핑 포맷터."""
+    """15:50 장 마감 오답노트 + TOP 20 역추적 + 자동학습 진척 브리핑 포맷터."""
     summary = top20_result.get("summary") or {}
     dt = str(summary.get("date") or "")
     hits = summary.get("hits") or []
@@ -85,6 +102,32 @@ def format_top20_analysis_message(
         for m in misses[:5]:
             tags_txt = f" | 전조: {', '.join(m['feature_tags'])}" if m.get("feature_tags") else ""
             lines.append(f"  - {m['name']} ({m['chg_pct']:+.1f}%): {m['diagnosis']}{tags_txt}")
+
+    if learning_result:
+        sc = learning_result.get("sample_counts") or {}
+        p4 = learning_result.get("phase4_policy") or {}
+        lines.append("")
+        lines.append(
+            f"🧠 [자동 학습 ({learning_result.get('learning_days', 0)}일차 · {sc.get('cohort_mode', 'LIVE')})]"
+        )
+        lines.append(
+            f"• 표본: 완료 {sc.get('effective_completed', 0)}/30건 "
+            f"(실전 {sc.get('live_completed', 0)}, 승자 {sc.get('effective_winners', 0)}/15) | "
+            f"3R 달성률 {learning_result.get('win_3r_rate', 0.0):.1f}% | 평균MFE +{learning_result.get('avg_mfe', 0.0):.1f}%"
+        )
+        promo = learning_result.get("promoted_track_d_patterns") or []
+        if promo:
+            lines.append(f"• 활성 Track D: {', '.join(promo)}")
+        adjs = learning_result.get("adjustments") or []
+        if adjs:
+            lines.append("• 오늘의 자동 보정: " + " / ".join(adjs[:3]))
+        else:
+            lines.append("• 오늘의 자동 보정: 파라미터 유지")
+        if learning_result.get("just_activated_phase4"):
+            lines.append(
+                f"🎓 [Phase 4 실측 SL/TP 자동 전환 완료!] "
+                f"SL {p4.get('default_sl_pct', -5.0):+.2f}% | TP {p4.get('tp_levels_pct', [])}"
+            )
     return "\n".join(lines)
 
 
@@ -103,6 +146,7 @@ def format_weekly_report_message(report: dict[str, Any]) -> str:
         ("TRACK_A_VCP", "Track A"),
         ("TRACK_B_PULLBACK", "Track B"),
         ("TRACK_C_TURNAROUND", "Track C"),
+        ("TRACK_D", "Track D(자동)"),
     ):
         st = (report.get("track_stats") or {}).get(tr) or {}
         lines.append(
@@ -140,6 +184,19 @@ def format_weekly_report_message(report: dict[str, Any]) -> str:
         )
     else:
         lines.append("  - 완료 승자 표본 축적 대기 중")
+
+    lp = report.get("learning_profile") or {}
+    ap = lp.get("adaptive_params") or {}
+    promo_d = lp.get("promoted_track_d_patterns") or []
+    if ap:
+        lines.append(
+            f"▪ 자동 보정 파라미터 ({lp.get('learning_days', 0)}일차): "
+            f"윗꼬리<={ap.get('max_upper_wick_ratio', 0.40):.2f} | "
+            f"최소R:R 1:{ap.get('min_projected_rr', 3.0):.1f} | "
+            f"약세R:R 1:{ap.get('weak_regime_min_rr', 3.5):.1f}"
+        )
+    if promo_d:
+        lines.append(f"▪ 실전 투입 중 Track D: {', '.join(promo_d)}")
 
     return "\n".join(lines)
 
@@ -219,8 +276,13 @@ class TelegramNotifier:
     def send_signal_alert(self, signal: dict[str, Any]) -> bool:
         return self.send_text(format_signal_message(signal))
 
-    def send_daily_analysis(self, error_result: dict[str, Any], top20_result: dict[str, Any]) -> bool:
-        return self.send_text(format_top20_analysis_message(error_result, top20_result))
+    def send_daily_analysis(
+        self,
+        error_result: dict[str, Any],
+        top20_result: dict[str, Any],
+        learning_result: dict[str, Any] | None = None,
+    ) -> bool:
+        return self.send_text(format_top20_analysis_message(error_result, top20_result, learning_result))
 
     def send_weekly_report(self, report: dict[str, Any]) -> bool:
         return self.send_text(format_weekly_report_message(report))

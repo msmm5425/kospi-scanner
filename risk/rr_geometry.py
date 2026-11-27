@@ -16,6 +16,8 @@ def _max_risk_limit_for_track(track: str) -> float:
         return settings.track_b_max_risk_pct
     if "TRACK_C" in t:
         return settings.track_c_max_risk_pct
+    if "TRACK_D" in t:
+        return 5.5
     return settings.track_c_max_risk_pct
 
 
@@ -25,9 +27,12 @@ def evaluate_rr_geometry(
     invalidation_raw: float,
     track: str,
     impulse_start_idx: int | None = None,
+    min_rr_override: float | None = None,
+    risk_mult: float = 1.0,
 ) -> dict[str, Any]:
     """1:3 손익비 성립 여부를 기하학(구조적 리스크 + 상단 매물대 공백)으로 사전 검증한다."""
-    max_risk_pct = _max_risk_limit_for_track(track)
+    max_risk_pct = round(_max_risk_limit_for_track(track) * float(risk_mult), 2)
+    eff_min_rr = float(min_rr_override) if min_rr_override is not None else settings.min_projected_rr
     entry_tick = round_to_tick(entry_price, mode="nearest")
     inval_tick = round_to_tick(invalidation_raw, mode="down")
 
@@ -110,8 +115,8 @@ def evaluate_rr_geometry(
         failed.append(
             f"상단 매물대 공백 부족 ({clear_upside_pct:.2f}% < {settings.min_clear_upside_pct:.1f}%)"
         )
-    if projected_rr < settings.min_projected_rr:
-        failed.append(f"예상 손익비 미달 (1:{projected_rr:.2f} < 1:{settings.min_projected_rr:.1f})")
+    if projected_rr < eff_min_rr:
+        failed.append(f"예상 손익비 미달 (1:{projected_rr:.2f} < 1:{eff_min_rr:.1f})")
 
     base_resp.update(
         {

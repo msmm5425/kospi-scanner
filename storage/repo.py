@@ -12,6 +12,7 @@ from typing import Any
 from config.settings import (
     DATA_DIR,
     KST,
+    LEARNING_PROFILE_FILE,
     PATTERN_QUEUE_FILE,
     SIGNALS_LOG_FILE,
     TOP20_HISTORY_FILE,
@@ -30,6 +31,66 @@ def _default_pattern_doc() -> dict[str, Any]:
     return {"schema_version": 1, "updated_at": "", "patterns": []}
 
 
+def _default_learning_profile() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "updated_at": "",
+        "learning_started_date": datetime.now(tz=KST).strftime("%Y-%m-%d"),
+        "learning_days": 0,
+        "sample_counts": {
+            "live_total": 0,
+            "live_completed": 0,
+            "live_winners": 0,
+            "bootstrap_completed": 0,
+            "effective_completed": 0,
+            "effective_winners": 0,
+        },
+        "adaptive_params": {
+            "max_upper_wick_ratio": 0.40,
+            "max_disparity_20_pct": 118.0,
+            "min_projected_rr": 3.0,
+            "weak_regime_min_rr": 3.5,
+            "weak_regime_risk_mult": 1.0,
+            "track_risk_mult": {
+                "TRACK_A_VCP": 1.0,
+                "TRACK_B_PULLBACK": 1.0,
+                "TRACK_C_TURNAROUND": 1.0,
+                "TRACK_D": 1.0,
+            },
+            "track_a_dry_vol_ratio_max": 0.60,
+            "track_weights": {
+                "TRACK_A_VCP": 1.0,
+                "TRACK_B_PULLBACK": 1.0,
+                "TRACK_C_TURNAROUND": 1.0,
+                "TRACK_D": 0.9,
+            },
+            "disabled_tracks": [],
+        },
+        "promoted_track_d_patterns": [],
+        "demoted_track_d_until": {},
+        "phase4_policy": {
+            "phase4_active": False,
+            "activated_date": None,
+            "sl_pct_by_track": {},
+            "default_sl_pct": None,
+            "tp_levels_pct": [10.0, 20.0, 30.0],
+            "breakeven_trigger_pct": 10.0,
+        },
+        "daily_history": [],
+        "last_adjustments": [],
+    }
+
+
+def _deep_merge_defaults(default_obj: dict[str, Any], loaded: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(default_obj)
+    for k, v in loaded.items():
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = _deep_merge_defaults(merged[k], v)
+        else:
+            merged[k] = v
+    return merged
+
+
 class StorageRepo:
     """스레드 안전한 원자적 JSON 저장소 및 오답노트/쿨다운 조회기."""
 
@@ -43,6 +104,11 @@ class StorageRepo:
         )
         self.pattern_path = (
             self.data_dir / PATTERN_QUEUE_FILE.name if data_dir is not None else PATTERN_QUEUE_FILE
+        )
+        self.learning_path = (
+            self.data_dir / LEARNING_PROFILE_FILE.name
+            if data_dir is not None
+            else LEARNING_PROFILE_FILE
         )
         self._lock = threading.RLock()
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -258,6 +324,14 @@ class StorageRepo:
                 doc["patterns"] = patterns[-1000:]
             self._write_json_atomic(self.pattern_path, doc)
         return added
+
+    # ── learning_profile.json ────────────────────────────────────────────
+    def load_learning_profile(self) -> dict[str, Any]:
+        loaded = self._read_json(self.learning_path, _default_learning_profile)
+        return _deep_merge_defaults(_default_learning_profile(), loaded)
+
+    def save_learning_profile(self, profile: dict[str, Any]) -> None:
+        self._write_json_atomic(self.learning_path, profile)
 
 
 repo = StorageRepo()

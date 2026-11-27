@@ -521,3 +521,160 @@ def test_kis_provider_payload_parsing() -> None:
     assert len(gainers) == 2
     assert gainers[0]["code"] == "181710"
     assert gainers[0]["trading_val"] > 0
+
+
+def test_auto_learner_adaptation_track_d_and_phase4(tmp_path) -> None:
+    from engines.auto_learner import run_auto_learning
+
+    store = StorageRepo(data_dir=tmp_path)
+    # 18개 승리 + 14개 실패 = 32개 COMPLETED 표본 구축 (오답 편향 포함)
+    for i in range(18):
+        dt = f"2026-12-{(i % 20) + 1:02d}"
+        store.upsert_signal(
+            {
+                "signal_id": f"20261201_{100000 + i * 10:06d}_A",
+                "signal_date": dt,
+                "origin": "LIVE",
+                "code": f"{100000 + i * 10:06d}",
+                "name": f"승자{i}",
+                "track": "TRACK_A_VCP",
+                "entry_price": 20_000,
+                "rr_geometry": {"invalidation_ref_price": 19_000, "risk_pct": 5.0, "nearest_resistance_price": None, "clear_upside_pct": 30.0, "projected_rr": 6.0},
+                "snapshot": {"upper_wick_ratio": 0.12, "market_regime": "NORMAL"},
+                "tracking": {"status": "COMPLETED", "days_elapsed": 10, "mfe_pct": 18.0 + (i % 10), "mae_pct": -2.5 - (i % 3) * 0.6, "max_r_multiple": 3.6, "hit_10pct": True, "hit_20pct": i % 2 == 0, "hit_30pct": False, "hit_3r": True, "closes": {}},
+                "error_tags": [],
+            }
+        )
+    for j in range(14):
+        is_weak = j < 7
+        tags = ["FAKEOUT_WICK", "RESISTANCE_REJECT", "RISK_BREACHED_EARLY"]
+        if is_weak:
+            tags.append("INDEX_DRAG")
+        store.upsert_signal(
+            {
+                "signal_id": f"20261202_{200000 + j * 10:06d}_B",
+                "signal_date": f"2026-12-{(j % 20) + 1:02d}",
+                "origin": "LIVE",
+                "code": f"{200000 + j * 10:06d}",
+                "name": f"패자{j}",
+                "track": "TRACK_B_PULLBACK",
+                "entry_price": 30_000,
+                "rr_geometry": {"invalidation_ref_price": 28_600, "risk_pct": 4.67, "nearest_resistance_price": 34_000, "clear_upside_pct": 13.3, "projected_rr": 3.1},
+                "snapshot": {"upper_wick_ratio": 0.36, "market_regime": "WEAK" if is_weak else "NORMAL"},
+                "tracking": {"status": "COMPLETED", "days_elapsed": 10, "mfe_pct": 1.8, "mae_pct": -5.5, "max_r_multiple": 0.39, "hit_10pct": False, "hit_20pct": False, "hit_30pct": False, "hit_3r": False, "closes": {}},
+                "error_tags": tags,
+            }
+        )
+
+    # pattern_queue에 GAP_BREAKAWAY 4회 (1:3 R:R 가능 3회) 적재 + TOP20 Track A 거래량고갈 5회 적재
+    store.append_pattern_entries(
+        [
+            {"date": f"2026-12-0{k}", "code": f"3000{k}0", "name": f"갭{k}", "chg_pct": 14.0, "tags": ["GAP_BREAKAWAY"], "rr_viable_1to3": k <= 3, "pre_entry_rr": 3.8}
+            for k in range(1, 5)
+        ]
+    )
+    store.upsert_top20_day(
+        {
+            "date": "2026-12-20",
+            "misses": [
+                {"code": f"4000{k}0", "name": f"미스{k}", "diagnosis": "D-1 Track A 근접 탈락 [거래량 고갈 64% (기준 60% 이하)]"}
+                for k in range(5)
+            ],
+        }
+    )
+
+    res = run_auto_learning(storage=store, as_of_date="2026-12-27")
+    ap = res["adaptive_params"]
+    assert res["cohort_mode"] == "LIVE_ONLY"
+    assert ap["max_upper_wick_ratio"] < 0.40
+    assert ap["min_projected_rr"] > 3.0
+    assert ap["weak_regime_min_rr"] > 3.5
+    assert ap["track_risk_mult"]["TRACK_B_PULLBACK"] < 1.0
+    assert ap["track_a_dry_vol_ratio_max"] > 0.60
+    assert "GAP_BREAKAWAY" in res["promoted_track_d_patterns"]
+    assert res["just_activated_phase4"] is True
+    assert res["phase4_policy"]["phase4_active"] is True
+    assert -6.5 <= res["phase4_policy"]["default_sl_pct"] <= -3.0
+
+    # 승격된 Track D가 실전에서 8건 연속 실패 시 자동 강등 확인
+    for d in range(8):
+        store.upsert_signal(
+            {
+                "signal_id": f"20261228_{500000 + d * 10:06d}_D",
+                "signal_date": "2026-12-28",
+                "origin": "LIVE",
+                "code": f"{500000 + d * 10:06d}",
+                "name": f"D패자{d}",
+                "track": "TRACK_D_GAP_BREAKAWAY",
+                "entry_price": 15_000,
+                "rr_geometry": {"invalidation_ref_price": 14_300, "risk_pct": 4.67, "nearest_resistance_price": None, "clear_upside_pct": 30.0, "projected_rr": 6.4},
+                "snapshot": {"upper_wick_ratio": 0.1, "market_regime": "NORMAL"},
+                "tracking": {"status": "COMPLETED", "days_elapsed": 10, "mfe_pct": 2.0, "mae_pct": -5.0, "max_r_multiple": 0.43, "hit_10pct": False, "hit_20pct": False, "hit_30pct": False, "hit_3r": False, "closes": {}},
+                "error_tags": ["FAKEOUT_WICK"],
+            }
+        )
+    res2 = run_auto_learning(storage=store, as_of_date="2026-12-28")
+    assert "GAP_BREAKAWAY" not in res2["promoted_track_d_patterns"]
+
+
+def test_track_d_execution_and_walkforward_bootstrap(tmp_path) -> None:
+    from engines.bootstrap_learner import run_bootstrap_learning
+
+    dates = _trading_dates(190, end="2026-11-27")
+    df_a = _make_track_a_vcp_df(dates)
+
+    # GAP_BREAKAWAY 전용 합성 차트 (A/B/C는 미충족, 갭상승 +4% & 강한 양봉)
+    gap_rows = []
+    for i, dt in enumerate(dates):
+        if i < len(dates) - 1:
+            c = 20_000.0 + (i * 20.0)
+            gap_rows.append({"date": dt, "open": c * 0.996, "high": c * 1.008, "low": c * 0.992, "close": c, "volume": 80_000.0, "amount": c * 80_000.0})
+        else:
+            prev_c = gap_rows[-1]["close"]
+            o = round_to_tick(prev_c * 1.035)
+            c = round_to_tick(prev_c * 1.075)
+            h = round_to_tick(c * 1.005)
+            l = round_to_tick(prev_c * 1.030)
+            gap_rows.append({"date": dt, "open": float(o), "high": float(h), "low": float(l), "close": float(c), "volume": 240_000.0, "amount": float(c * 240_000.0)})
+    df_gap = pd.DataFrame(gap_rows)
+
+    sup = {"frgn_today": 10_000, "orgn_today": 12_000, "frgn_3d": 25_000, "orgn_3d": 25_000, "total_5d": 50_000, "pos_days_5d": 4, "intraday_pending": False, "orgn_series": [5000] * 5}
+    provider = MockProvider(
+        universe=[{"code": "100050", "name": "갭돌파주", "marcap": 500_000_000_000, "trading_val": float(df_gap.iloc[-1]["amount"]), "price": float(df_gap.iloc[-1]["close"]), "chg_pct": 7.5}],
+        ohlcv_map={"100050": df_gap},
+        supply_map={"100050": sup},
+        index_df=_make_index_df(dates, weak=False),
+    )
+
+    store = StorageRepo(data_dir=tmp_path)
+    lp = store.load_learning_profile()
+    lp["promoted_track_d_patterns"] = ["GAP_BREAKAWAY"]
+    lp["phase4_policy"] = {
+        "phase4_active": True,
+        "activated_date": "2026-11-27",
+        "default_sl_pct": -4.2,
+        "sl_pct_by_track": {},
+        "tp_levels_pct": [10.0, 20.0, 30.0],
+        "breakeven_trigger_pct": 10.0,
+    }
+    store.save_learning_profile(lp)
+
+    res = run_scan(provider=provider, storage=store, now_kst=datetime(2026, 11, 27, 14, 0, tzinfo=KST), send_notifications=False)
+    assert len(res["signals"]) == 1
+    sig = res["signals"][0]
+    assert sig["track"] == "TRACK_D_GAP_BREAKAWAY"
+    assert sig["phase4_sl_tp"]["sl_pct"] == -4.2
+    msg = format_signal_message(sig)
+    assert "Phase 4" in msg
+
+    # 워크포워드 부트스트랩 실행 검증
+    boot_store = StorageRepo(data_dir=tmp_path / "boot")
+    boot_provider = MockProvider(
+        universe=[{"code": "100010", "name": "알파테스트", "marcap": 600_000_000_000, "trading_val": float(df_a.iloc[-1]["amount"]), "price": float(df_a.iloc[-1]["close"]), "chg_pct": 4.2}],
+        ohlcv_map={"100010": df_a},
+        supply_map={"100010": sup},
+        index_df=_make_index_df(dates, weak=False),
+    )
+    boot_res = run_bootstrap_learning(provider=boot_provider, storage=boot_store, lookback_days=15, max_stocks=10)
+    assert boot_res["days_replayed"] == 15
+    assert boot_res["learning"]["date"] == dates[-1]

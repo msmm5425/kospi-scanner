@@ -5,6 +5,7 @@ from .settings import (
     SIGNALS_LOG_FILE,
     TOP20_HISTORY_FILE,
     PATTERN_QUEUE_FILE,
+    LEARNING_PROFILE_FILE,
     Settings,
     settings,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "SIGNALS_LOG_FILE",
     "TOP20_HISTORY_FILE",
     "PATTERN_QUEUE_FILE",
+    "LEARNING_PROFILE_FILE",
     "Settings",
     "settings",
 ]

@@ -39,18 +39,20 @@ jobs:
           KOSPI_TELEGRAM_CHAT_ID: ${{ secrets.KOSPI_TELEGRAM_CHAT_ID }}
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            python main_analyze.py --dry-run
+            python main_analyze.py --dry-run --bootstrap-if-empty
           else
-            python main_analyze.py
+            python main_analyze.py --bootstrap-if-empty
           fi
       - name: Commit daily analysis logs
         if: github.event.inputs.dry_run != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add storage/data/signals_log.json storage/data/top20_history.json storage/data/pattern_queue.json
+          git add storage/data/signals_log.json storage/data/top20_history.json storage/data/pattern_queue.json storage/data/learning_profile.json
           if ! git diff --cached --quiet; then
-            git commit -m "chore(data): daily error log and top20 analysis [skip ci]"
-            git pull --rebase origin main || true
-            git push origin HEAD:main
+            git commit -m "chore(data): daily error log, top20, and auto-learning [skip ci]"
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push origin HEAD:main && break
+              sleep 3
+            done
           fi

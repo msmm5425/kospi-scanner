@@ -49,6 +49,8 @@ def evaluate_common_gate(
     marcap_krw: float,
     now_kst: datetime | None = None,
     min_trading_val_override: int | None = None,
+    max_upper_wick_override: float | None = None,
+    max_disparity_override: float | None = None,
 ) -> dict[str, Any]:
     """Track A/B/C 검사 전 공통 기술적 · 추격 방지 · 유동성 관문 평가."""
     regime_info = evaluate_market_regime(index_df)
@@ -56,6 +58,16 @@ def evaluate_common_gate(
         int(min_trading_val_override)
         if min_trading_val_override is not None
         else get_dynamic_min_trading_val_krw(now_kst or datetime.now(tz=KST))
+    )
+    max_wick = (
+        float(max_upper_wick_override)
+        if max_upper_wick_override is not None
+        else settings.max_upper_wick_ratio
+    )
+    max_disp = (
+        float(max_disparity_override)
+        if max_disparity_override is not None
+        else settings.max_disparity_20_pct
     )
 
     if df is None or len(df) < 25:
@@ -89,10 +101,10 @@ def evaluate_common_gate(
         failed.append(f"당일 상승 탄력 부족 ({chg_pct:+.2f}% < +{settings.min_chg_pct:.1f}%)")
     elif chg_pct > settings.max_chg_pct:
         failed.append(f"당일 급등 추격 차단 ({chg_pct:+.2f}% > +{settings.max_chg_pct:.1f}%)")
-    if wick_ratio > settings.max_upper_wick_ratio:
-        failed.append(f"윗꼬리 과다 ({wick_ratio:.2f} > {settings.max_upper_wick_ratio:.2f})")
-    if disp_20 <= 0 or disp_20 > settings.max_disparity_20_pct:
-        failed.append(f"20일선 이격 과열 ({disp_20:.1f}% > {settings.max_disparity_20_pct:.0f}%)")
+    if wick_ratio > max_wick:
+        failed.append(f"윗꼬리 과다 ({wick_ratio:.2f} > {max_wick:.2f})")
+    if disp_20 <= 0 or disp_20 > max_disp:
+        failed.append(f"20일선 이격 과열 ({disp_20:.1f}% > {max_disp:.0f}%)")
     if rs_20 <= 0.0 and rs_60 <= 0.0:
         failed.append(f"상대강도 열위 (RS20 {rs_20:+.1f}%, RS60 {rs_60:+.1f}%)")
 

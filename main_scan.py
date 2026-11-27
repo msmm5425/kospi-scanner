@@ -4,7 +4,9 @@ import argparse
 import logging
 import sys
 
-from config.settings import settings
+from datetime import datetime
+
+from config.settings import KST, settings
 from engines.scanner import run_scan
 from notify.telegram_bot import TelegramNotifier
 from providers.factory import create_provider
@@ -24,12 +26,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", default=None, help="기준 날짜 YYYY-MM-DD (과거 시뮬레이션용)")
     parser.add_argument("--dry-run", action="store_true", help="저장/실제 텔레그램 발송 없이 시뮬레이션")
     parser.add_argument("--no-notify", action="store_true", help="텔레그램 발송 생략")
+    parser.add_argument("--force", action="store_true", help="휴장일/비개장일 가드 무시 강제 실행")
     parser.add_argument("--verbose", action="store_true", help="상세 로그 출력")
     args = parser.parse_args(argv)
 
     _configure_logging(args.verbose)
     provider = create_provider(provider_name=args.provider, as_of_date=args.date)
     notifier = TelegramNotifier(dry_run=args.dry_run or settings.dry_run)
+
+    today_kst = datetime.now(tz=KST).strftime("%Y-%m-%d")
+    if args.date is None and not args.force:
+        idx_df = provider.get_index_ohlcv(bars=5)
+        latest_idx_date = str(idx_df["date"].iloc[-1]) if not idx_df.empty else ""
+        if latest_idx_date != today_kst:
+            print(f"[SCAN 스킵] 오늘은 KRX 휴장일/비개장일입니다 (오늘={today_kst}, 최근 거래일={latest_idx_date}).")
+            return 0
 
     res = run_scan(
         provider=provider,

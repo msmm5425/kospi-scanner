@@ -73,6 +73,9 @@ def build_weekly_report(
     track_stats: dict[str, Any] = {}
     for tr in ("TRACK_A_VCP", "TRACK_B_PULLBACK", "TRACK_C_TURNAROUND"):
         track_stats[tr] = _summarize_track([s for s in signals if s.get("track") == tr])
+    track_stats["TRACK_D"] = _summarize_track(
+        [s for s in signals if str(s.get("track", "")).startswith("TRACK_D")]
+    )
     track_stats["ALL"] = _summarize_track(signals)
 
     # 장세별 성과 비교 (NORMAL vs WEAK)
@@ -136,12 +139,14 @@ def build_weekly_report(
         else None
     )
 
+    learning_profile = store.load_learning_profile()
     return {
         "as_of_date": ref_date_str,
         "weekly_signal_count": len(weekly_signals),
         "total_signal_count": len(signals),
         "winner_sample_count": len(winners),
-        "phase4_ready": len(winners) >= 30,
+        "phase4_ready": bool((learning_profile.get("phase4_policy") or {}).get("phase4_active")) or len(winners) >= 30,
+        "learning_profile": learning_profile,
         "track_stats": track_stats,
         "regime_stats": regime_stats,
         "top3_errors": top3_errors,

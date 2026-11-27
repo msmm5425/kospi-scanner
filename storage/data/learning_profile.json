@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "updated_at": "",
+  "learning_started_date": "2026-11-27",
+  "learning_days": 0,
+  "sample_counts": {
+    "live_total": 0,
+    "live_completed": 0,
+    "live_winners": 0,
+    "bootstrap_completed": 0,
+    "effective_completed": 0,
+    "effective_winners": 0
+  },
+  "adaptive_params": {
+    "max_upper_wick_ratio": 0.4,
+    "max_disparity_20_pct": 118.0,
+    "min_projected_rr": 3.0,
+    "weak_regime_min_rr": 3.5,
+    "weak_regime_risk_mult": 1.0,
+    "track_risk_mult": {
+      "TRACK_A_VCP": 1.0,
+      "TRACK_B_PULLBACK": 1.0,
+      "TRACK_C_TURNAROUND": 1.0,
+      "TRACK_D": 1.0
+    },
+    "track_a_dry_vol_ratio_max": 0.6,
+    "track_weights": {
+      "TRACK_A_VCP": 1.0,
+      "TRACK_B_PULLBACK": 1.0,
+      "TRACK_C_TURNAROUND": 1.0,
+      "TRACK_D": 0.9
+    },
+    "disabled_tracks": []
+  },
+  "promoted_track_d_patterns": [],
+  "demoted_track_d_until": {},
+  "phase4_policy": {
+    "phase4_active": false,
+    "activated_date": null,
+    "sl_pct_by_track": {},
+    "default_sl_pct": null,
+    "tp_levels_pct": [
+      10.0,
+      20.0,
+      30.0
+    ],
+    "breakeven_trigger_pct": 10.0
+  },
+  "daily_history": [],
+  "last_adjustments": []
+}

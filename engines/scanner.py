@@ -9,12 +9,14 @@ from config.settings import KST, get_dynamic_min_trading_val_krw, settings
 from indicators.technicals import compute_indicators
 from notify.telegram_bot import TelegramNotifier
 from providers.base import MarketDataProvider
+from risk.krx_tick import round_to_tick
 from risk.rr_geometry import evaluate_rr_geometry
 from storage.repo import StorageRepo, repo as default_repo
 from strategies.common_gate import evaluate_common_gate
 from strategies.track_a_vcp import evaluate_track_a
 from strategies.track_b_pullback import evaluate_track_b
 from strategies.track_c_turnaround import evaluate_track_c
+from strategies.track_d_learned import evaluate_track_d
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +30,35 @@ _TRACK_SHORT_SUFFIX = {
 def _evaluate_priority_tracks(
     df_ind,
     supply: dict[str, Any],
+    adaptive_params: dict[str, Any] | None = None,
+    promoted_track_d: list[str] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """우선순위 Track A -> B -> C 순서대로 평가해 첫 통과 트랙과 전체 진단 목록을 반환."""
+    """우선순위 Track A -> B -> C -> D(자동승격) 순서대로 평가해 첫 통과 트랙 반환."""
+    adaptive = adaptive_params or {}
+    disabled = {str(t).upper() for t in (adaptive.get("disabled_tracks") or [])}
+    dry_max = adaptive.get("track_a_dry_vol_ratio_max")
+
     diagnostics: list[dict[str, Any]] = []
-    for evaluator in (evaluate_track_a, evaluate_track_b, evaluate_track_c):
-        res = evaluator(df_ind, supply)
-        diagnostics.append(res)
-        if res["passed"]:
-            return res, diagnostics
+    if "TRACK_A_VCP" not in disabled:
+        res_a = evaluate_track_a(df_ind, supply, dry_vol_ratio_max=dry_max)
+        diagnostics.append(res_a)
+        if res_a["passed"]:
+            return res_a, diagnostics
+    if "TRACK_B_PULLBACK" not in disabled:
+        res_b = evaluate_track_b(df_ind, supply)
+        diagnostics.append(res_b)
+        if res_b["passed"]:
+            return res_b, diagnostics
+    if "TRACK_C_TURNAROUND" not in disabled:
+        res_c = evaluate_track_c(df_ind, supply)
+        diagnostics.append(res_c)
+        if res_c["passed"]:
+            return res_c, diagnostics
+    if promoted_track_d:
+        res_d = evaluate_track_d(df_ind, supply, promoted_patterns=promoted_track_d)
+        diagnostics.append(res_d)
+        if res_d["passed"]:
+            return res_d, diagnostics
     return None, diagnostics
 
 
@@ -48,17 +71,20 @@ def _build_signal_record(
     gate_res: dict[str, Any],
     supply: dict[str, Any],
     df_ind,
+    origin: str = "LIVE",
+    learning_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     track_code = track_res["track"]
-    suffix = _TRACK_SHORT_SUFFIX.get(track_code, "X")
+    suffix = "D" if track_code.startswith("TRACK_D") else _TRACK_SHORT_SUFFIX.get(track_code, "X")
     sig_id = f"{signal_date.replace('-', '')}_{code}_{suffix}"
 
     last_obv = float(df_ind["obv"].iloc[-1])
     last_obv_ma5 = float(df_ind["obv_ma5"].iloc[-1])
 
-    return {
+    record: dict[str, Any] = {
         "signal_id": sig_id,
         "signal_date": signal_date,
+        "origin": origin,
         "code": code,
         "name": name,
         "track": track_code,
@@ -103,6 +129,26 @@ def _build_signal_record(
         },
         "error_tags": [],
     }
+    p4 = (learning_profile or {}).get("phase4_policy") or {}
+    if p4.get("phase4_active") and p4.get("default_sl_pct") is not None:
+        tr_group = "TRACK_D" if track_code.startswith("TRACK_D") else track_code
+        sl_pct = float((p4.get("sl_pct_by_track") or {}).get(tr_group) or p4["default_sl_pct"])
+        entry_p = float(rr_res["entry_price"])
+        sl_price = max(
+            int(rr_res["invalidation_ref_price"]),
+            round_to_tick(entry_p * (1.0 + sl_pct / 100.0), mode="down"),
+        )
+        tps = [float(x) for x in (p4.get("tp_levels_pct") or [10.0, 20.0, 30.0])]
+        record["phase4_sl_tp"] = {
+            "sl_pct": round(sl_pct, 2),
+            "sl_price": sl_price,
+            "tp_levels": [
+                {"pct": tp_pct, "price": round_to_tick(entry_p * (1.0 + tp_pct / 100.0), mode="nearest")}
+                for tp_pct in tps
+            ],
+            "breakeven_trigger_pct": float(p4.get("breakeven_trigger_pct") or tps[0]),
+        }
+    return record
 
 
 def run_scan(
@@ -113,12 +159,17 @@ def run_scan(
     dry_run: bool = False,
     min_trading_val_override: int | None = None,
     send_notifications: bool = True,
+    origin: str = "LIVE",
+    learning_profile_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """장중 코스피 1:3 스윙 스캔 실행: 유니버스 -> 안전필터 -> 공통관문 -> Track A/B/C -> R:R 검증."""
+    """장중 코스피 1:3 스윙 스캔 실행: 유니버스 -> 안전필터 -> 공통관문 -> Track A/B/C/D -> R:R 검증."""
     t_start = time.time()
     store = storage or default_repo
     bot = notifier or TelegramNotifier(dry_run=dry_run)
     eff_now = now_kst or datetime.now(tz=KST)
+    learning_profile = learning_profile_override or store.load_learning_profile()
+    adaptive = learning_profile.get("adaptive_params") or {}
+    promoted_track_d = learning_profile.get("promoted_track_d_patterns") or []
     eff_min_tval = (
         int(min_trading_val_override)
         if min_trading_val_override is not None
@@ -203,16 +254,33 @@ def run_scan(
             marcap_krw=marcap,
             now_kst=eff_now,
             min_trading_val_override=min_trading_val_override,
+            max_upper_wick_override=adaptive.get("max_upper_wick_ratio"),
+            max_disparity_override=adaptive.get("max_disparity_20_pct"),
         )
         if not gate_res["passed"]:
             stats["gate_rejected"] += 1
             continue
 
         supply = provider.get_investor_supply(code, days=settings.supply_days)
-        passed_track, _ = _evaluate_priority_tracks(df_ind, supply)
+        passed_track, _ = _evaluate_priority_tracks(
+            df_ind,
+            supply,
+            adaptive_params=adaptive,
+            promoted_track_d=promoted_track_d,
+        )
         if passed_track is None:
             stats["strategy_rejected"] += 1
             continue
+
+        tr_group = "TRACK_D" if passed_track["track"].startswith("TRACK_D") else passed_track["track"]
+        t_risk_mult = float((adaptive.get("track_risk_mult") or {}).get(tr_group, 1.0))
+        base_min_rr = float(adaptive.get("min_projected_rr", settings.min_projected_rr))
+        if gate_res["market_regime"] == "WEAK":
+            eff_min_rr = max(base_min_rr, float(adaptive.get("weak_regime_min_rr", 3.5)))
+            eff_risk_mult = t_risk_mult * float(adaptive.get("weak_regime_risk_mult", 1.0))
+        else:
+            eff_min_rr = base_min_rr
+            eff_risk_mult = t_risk_mult
 
         rr_res = evaluate_rr_geometry(
             df=df_ind,
@@ -220,6 +288,8 @@ def run_scan(
             invalidation_raw=float(passed_track["invalidation_raw"]),
             track=passed_track["track"],
             impulse_start_idx=(passed_track.get("metrics") or {}).get("anchor_idx"),
+            min_rr_override=eff_min_rr,
+            risk_mult=eff_risk_mult,
         )
         if not rr_res["passed"]:
             stats["rr_rejected"] += 1
@@ -246,6 +316,8 @@ def run_scan(
             gate_res=gate_res,
             supply=supply,
             df_ind=df_ind,
+            origin=origin,
+            learning_profile=learning_profile,
         )
         captured_signals.append(sig)
 

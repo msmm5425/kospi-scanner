@@ -20,6 +20,7 @@ DATA_DIR = PROJECT_ROOT / "storage" / "data"
 SIGNALS_LOG_FILE = DATA_DIR / "signals_log.json"
 TOP20_HISTORY_FILE = DATA_DIR / "top20_history.json"
 PATTERN_QUEUE_FILE = DATA_DIR / "pattern_queue.json"
+LEARNING_PROFILE_FILE = DATA_DIR / "learning_profile.json"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:

@@ -11,8 +11,14 @@ from indicators.technicals import compute_vcp_contraction_ratio
 def evaluate_track_a(
     df: pd.DataFrame,
     supply: dict[str, Any],
+    dry_vol_ratio_max: float | None = None,
 ) -> dict[str, Any]:
     """Track A: VCP 타이트 변동성 축소 돌파 (Minervini)."""
+    eff_dry_max = (
+        float(dry_vol_ratio_max)
+        if dry_vol_ratio_max is not None
+        else settings.track_a_dry_vol_ratio_max
+    )
     total_checks = 5
     if df is None or len(df) < 66:
         return {
@@ -55,12 +61,12 @@ def evaluate_track_a(
             f"VCP 변동성 수축 미달 ({vcp_ratio * 100:.0f}% > 기준 {settings.track_a_vcp_ratio_max * 100:.0f}%)"
         )
 
-    # 3. 거래량 고갈 (직전 5일 중 최소 거래량 <= 직전 20일 평균의 60%)
+    # 3. 거래량 고갈 (직전 5일 중 최소 거래량 <= 직전 20일 평균의 기준치 이하)
     min_vol_5d = float(pre_5["volume"].min())
     dry_ratio = (min_vol_5d / vol_ma20_prev) if vol_ma20_prev > 0 else 9.9
-    if dry_ratio > settings.track_a_dry_vol_ratio_max:
+    if dry_ratio > eff_dry_max:
         failed.append(
-            f"거래량 고갈 {dry_ratio * 100:.0f}% (기준 {settings.track_a_dry_vol_ratio_max * 100:.0f}% 이하)"
+            f"거래량 고갈 {dry_ratio * 100:.0f}% (기준 {eff_dry_max * 100:.0f}% 이하)"
         )
 
     # 4. 피벗 돌파 (당일 거래량 >= 직전 20일 평균 180% AND 종가 >= 직전 15일 고점의 98.5%)
