@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class KISProvider(MarketDataProvider):
-    """[연동 대기] 한국투자증권 KIS Developers REST API 어댑터 (GitHub Actions 호환)."""
+    """[연동 완료] 한국투자증권 KIS Developers REST API 어댑터 (GitHub Actions 호환)."""
 
     provider_name = "kis"
 
@@ -33,15 +33,23 @@ class KISProvider(MarketDataProvider):
         self.as_of_date = as_of_date
         self.app_key = settings.kis_app_key
         self.app_secret = settings.kis_app_secret
-        self.base_url = settings.kis_api_base_url.rstrip("/")
+        default_base = (
+            "https://openapivts.koreainvestment.com:29443"
+            if settings.kis_is_paper
+            else "https://openapi.koreainvestment.com:9443"
+        )
+        self.base_url = (settings.kis_api_base_url or default_base).rstrip("/")
+        if settings.kis_is_paper and "openapi.koreainvestment.com" in self.base_url:
+            self.base_url = "https://openapivts.koreainvestment.com:29443"
         self._lock = threading.RLock()
         self._session = requests.Session()
         self._last_req_ts = 0.0
-        self._min_interval_sec = 0.056  # 실전 초당 20건 대비 안전 상한(~17.8 req/s)
+        self._min_interval_sec = 0.16  # KIS 실전 앱키 버스트(EGW00201) 방지 안전 간격 (~6 req/s)
         self._token: str = ""
         self._token_expire_ts: float = 0.0
         self._token_cache_file = Path(tempfile.gettempdir()) / "kospi_scanner_kis_token.json"
         self._universe_cache: dict[str, list[dict[str, Any]]] = {}
+        self._marcap_map_cache: dict[str, int] = {}
 
     def _require_credentials(self) -> None:
         if not self.app_key or not self.app_secret:
@@ -128,16 +136,20 @@ class KISProvider(MarketDataProvider):
             "custtype": "P",
         }
         url = f"{self.base_url}{path}"
-        for attempt in range(3):
+        for attempt in range(5):
             self._throttle()
-            resp = self._session.get(url, headers=headers, params=params, timeout=10.0)
+            resp = self._session.get(url, headers=headers, params=params, timeout=12.0)
             if resp.status_code == 200:
                 payload = resp.json()
                 if str(payload.get("rt_cd")) == "0":
                     return payload
                 msg_cd = str(payload.get("msg_cd") or "")
+                # 초당 거래건수 초과 재시도
+                if msg_cd == "EGW00201" and attempt < 4:
+                    time.sleep(0.55 * (attempt + 1))
+                    continue
                 # 토큰 만료 코드 재시도
-                if msg_cd in {"EGW00123", "EGW00121"} and attempt < 2:
+                if msg_cd in {"EGW00123", "EGW00121"} and attempt < 4:
                     with self._lock:
                         self._token = ""
                         self._token_expire_ts = 0.0
@@ -146,8 +158,8 @@ class KISProvider(MarketDataProvider):
                 raise RuntimeError(
                     f"KIS API 오류 ({tr_id}): {payload.get('msg_cd')} {payload.get('msg1')}"
                 )
-            if resp.status_code in {429, 500, 502, 503, 504} and attempt < 2:
-                time.sleep(0.6 * (attempt + 1))
+            if resp.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+                time.sleep(0.65 * (attempt + 1))
                 continue
             resp.raise_for_status()
         raise RuntimeError(f"KIS API 요청 실패 ({path}, {tr_id})")
@@ -181,7 +193,10 @@ class KISProvider(MarketDataProvider):
                 if not (lo_cap <= marcap <= hi_cap):
                     continue
                 close_p = float(pd.to_numeric(row.get("Close", 0), errors="coerce") or 0)
+                vol = float(pd.to_numeric(row.get("Volume", 0), errors="coerce") or 0)
                 tval = float(pd.to_numeric(row.get("Amount", 0), errors="coerce") or 0)
+                if tval <= 0 and close_p > 0 and vol > 0:
+                    tval = close_p * vol
                 chg = float(pd.to_numeric(row.get("ChagesRatio", 0), errors="coerce") or 0)
                 result.append(
                     {
@@ -196,6 +211,8 @@ class KISProvider(MarketDataProvider):
         result.sort(key=lambda x: x["trading_val"], reverse=True)
         with self._lock:
             self._universe_cache[cache_key] = result
+            for item in result:
+                self._marcap_map_cache[item["code"]] = item["marcap"]
         return result
 
     def get_safety_status(self, code: str) -> dict[str, Any]:
@@ -213,7 +230,7 @@ class KISProvider(MarketDataProvider):
         reasons: list[str] = []
         if str(out.get("mang_issu_yn", "N")).upper() == "Y":
             reasons.append("관리종목")
-        if str(out.get("trht_yn", "N")).upper() == "Y":
+        if str(out.get("temp_stop_yn", "N")).upper() == "Y" or str(out.get("trht_yn", "N")).upper() == "Y":
             reasons.append("거래정지")
         if str(out.get("sltr_yn", "N")).upper() == "Y":
             reasons.append("정리매매")
@@ -221,6 +238,17 @@ class KISProvider(MarketDataProvider):
         warn_map = {"01": "투자주의", "02": "투자경고", "03": "투자위험"}
         if warn_cd in warn_map:
             reasons.append(warn_map[warn_cd])
+        stat_cd = str(out.get("iscd_stat_cls_code") or "").strip()
+        stat_map = {
+            "51": "관리종목",
+            "52": "투자위험",
+            "53": "투자경고",
+            "54": "투자주의",
+            "58": "거래정지",
+            "59": "단기과열",
+        }
+        if stat_cd in stat_map and stat_map[stat_cd] not in reasons:
+            reasons.append(stat_map[stat_cd])
 
         return {
             "is_safe": len(reasons) == 0 and price > 0,
@@ -308,15 +336,22 @@ class KISProvider(MarketDataProvider):
         rows = payload.get("output") or []
         eff_end = (end_date or self.as_of_date or "").replace("-", "")
         filtered = []
+        intraday_pending = False
         for r in rows:
             dt = str(r.get("stck_bsop_date") or "")
             if eff_end and dt > eff_end:
                 continue
+            raw_f = str(r.get("frgn_ntby_qty") or "").strip()
+            raw_o = str(r.get("orgn_ntby_qty") or "").strip()
+            # 장중 당일 행은 확정 전까지 "" 빈 문자열로 내려오므로 3일/5일 합산에서 제외
+            if raw_f == "" and raw_o == "":
+                intraday_pending = True
+                continue
             filtered.append(
                 {
                     "date": dt,
-                    "frgn": int(float(r.get("frgn_ntby_qty") or 0)),
-                    "orgn": int(float(r.get("orgn_ntby_qty") or 0)),
+                    "frgn": int(float(raw_f or 0)),
+                    "orgn": int(float(raw_o or 0)),
                 }
             )
         filtered.sort(key=lambda x: x["date"])
@@ -335,13 +370,13 @@ class KISProvider(MarketDataProvider):
 
         w3 = recent[-3:]
         return {
-            "frgn_today": recent[-1]["frgn"],
-            "orgn_today": recent[-1]["orgn"],
+            "frgn_today": 0 if intraday_pending else recent[-1]["frgn"],
+            "orgn_today": 0 if intraday_pending else recent[-1]["orgn"],
             "frgn_3d": sum(r["frgn"] for r in w3),
             "orgn_3d": sum(r["orgn"] for r in w3),
             "total_5d": sum(r["frgn"] + r["orgn"] for r in recent),
             "pos_days_5d": sum(1 for r in recent if (r["frgn"] + r["orgn"]) > 0),
-            "intraday_pending": False,
+            "intraday_pending": intraday_pending,
             "orgn_series": [r["orgn"] for r in recent],
         }
 
@@ -351,19 +386,34 @@ class KISProvider(MarketDataProvider):
         end_date: str | None = None,
     ) -> pd.DataFrame:
         eff_end = (end_date or self.as_of_date or datetime.now(tz=KST).strftime("%Y-%m-%d")).replace("-", "")
-        payload = self._request_get(
-            "/uapi/domestic-stock/v1/quotations/inquire-index-dailyprice",
-            "FHKUP03500100",
-            {
-                "FID_COND_MRKT_DIV_CODE": "U",
-                "FID_INPUT_ISCD": "0001",
-                "FID_INPUT_DATE_1": eff_end,
-                "FID_PERIOD_DIV_CODE": "D",
-            },
-        )
-        rows = payload.get("output2") or []
+        end_dt = datetime.strptime(eff_end, "%Y%m%d").date()
+
+        all_rows: list[dict[str, Any]] = []
+        cursor_end = end_dt
+        for _ in range(4):
+            cursor_start = cursor_end - timedelta(days=140)
+            payload = self._request_get(
+                "/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice",
+                "FHKUP03500100",
+                {
+                    "FID_COND_MRKT_DIV_CODE": "U",
+                    "FID_INPUT_ISCD": "0001",
+                    "FID_INPUT_DATE_1": cursor_start.strftime("%Y%m%d"),
+                    "FID_INPUT_DATE_2": cursor_end.strftime("%Y%m%d"),
+                    "FID_PERIOD_DIV_CODE": "D",
+                },
+            )
+            chunk = payload.get("output2") or []
+            if not chunk:
+                break
+            all_rows.extend(chunk)
+            oldest = min(str(r.get("stck_bsop_date") or "") for r in chunk if r.get("stck_bsop_date"))
+            if not oldest or len(all_rows) >= (bars + 5):
+                break
+            cursor_end = datetime.strptime(oldest, "%Y%m%d").date() - timedelta(days=1)
+
         records = []
-        for r in rows:
+        for r in all_rows:
             dt = str(r.get("stck_bsop_date") or "")
             cl = float(r.get("bstp_nmix_prpr") or 0)
             if len(dt) != 8 or cl <= 0:
@@ -372,12 +422,12 @@ class KISProvider(MarketDataProvider):
                 {
                     "date": f"{dt[:4]}-{dt[4:6]}-{dt[6:8]}",
                     "close": cl,
-                    "chg_pct": float(r.get("bstp_nmix_prdy_ctrt") or 0),
                 }
             )
         if not records:
             return pd.DataFrame(columns=["date", "close", "chg_pct"])
         df = pd.DataFrame(records).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
+        df["chg_pct"] = (df["close"].pct_change().fillna(0.0) * 100.0).round(2)
         return df.tail(bars).reset_index(drop=True)
 
     def get_top_gainers(
@@ -417,7 +467,8 @@ class KISProvider(MarketDataProvider):
                 continue
             close_p = float(r.get("stck_prpr") or 0)
             chg = float(r.get("prdy_ctrt") or 0)
-            tval = float(r.get("acml_tr_pbmn") or 0)
+            vol = float(r.get("acml_vol") or 0)
+            tval = float(r.get("acml_tr_pbmn") or (close_p * vol))
             if close_p <= 0 or tval < settings.top20_min_trading_val_krw:
                 continue
             out.append(
@@ -427,9 +478,8 @@ class KISProvider(MarketDataProvider):
                     "close": close_p,
                     "chg_pct": round(chg, 2),
                     "trading_val": tval,
-                    "marcap": 0,
+                    "marcap": self._marcap_map_cache.get(code, 0),
                 }
             )
-            if len(out) >= top_n:
-                break
-        return out
+        out.sort(key=lambda x: x["chg_pct"], reverse=True)
+        return out[: max(1, int(top_n))]

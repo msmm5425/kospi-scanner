@@ -439,3 +439,85 @@ def test_error_log_top20_and_weekly_report(tmp_path) -> None:
     assert weekly["total_signal_count"] == 2
     assert weekly["phase4_distribution"]["recommended_sl_mae_85pct"] is not None
     assert len(weekly["top3_errors"]) >= 1
+
+
+def test_kis_provider_payload_parsing() -> None:
+    from providers.kis_provider import KISProvider
+
+    kis = KISProvider()
+    kis.app_key = "TEST_KEY_00"
+    kis.app_secret = "TEST_SEC"
+
+    # 1. inquire-price 실전 응답 파싱 (temp_stop_yn / iscd_stat_cls_code 포함)
+    kis._request_get = lambda path, tr_id, params: {
+        "rt_cd": "0",
+        "output": {
+            "stck_prpr": "179000",
+            "prdy_ctrt": "4.50",
+            "acml_tr_pbmn": "1480984259100",
+            "iscd_stat_cls_code": "55",
+            "temp_stop_yn": "N",
+            "sltr_yn": "N",
+            "mrkt_warn_cls_code": "00",
+        },
+    }
+    ok_safety = kis.get_safety_status("005930")
+    assert ok_safety["is_safe"] is True
+    assert ok_safety["price"] == 179000.0
+
+    kis._request_get = lambda path, tr_id, params: {
+        "rt_cd": "0",
+        "output": {
+            "stck_prpr": "5000",
+            "prdy_ctrt": "0",
+            "acml_tr_pbmn": "0",
+            "iscd_stat_cls_code": "51",
+            "temp_stop_yn": "Y",
+            "sltr_yn": "N",
+            "mrkt_warn_cls_code": "00",
+        },
+    }
+    bad_safety = kis.get_safety_status("000010")
+    assert bad_safety["is_safe"] is False
+    assert "거래정지" in bad_safety["reject_reason"]
+    assert "관리종목" in bad_safety["reject_reason"]
+
+    # 2. inquire-investor 장중 빈 문자열("") 행 제외 후 3일/5일 합산 확인
+    kis._request_get = lambda path, tr_id, params: {
+        "rt_cd": "0",
+        "output": [
+            {"stck_bsop_date": "20261127", "frgn_ntby_qty": "", "orgn_ntby_qty": ""},
+            {"stck_bsop_date": "20261126", "frgn_ntby_qty": "100", "orgn_ntby_qty": "200"},
+            {"stck_bsop_date": "20261125", "frgn_ntby_qty": "50", "orgn_ntby_qty": "50"},
+            {"stck_bsop_date": "20261124", "frgn_ntby_qty": "10", "orgn_ntby_qty": "-5"},
+        ],
+    }
+    sup = kis.get_investor_supply("005930", days=5)
+    assert sup["intraday_pending"] is True
+    assert sup["frgn_3d"] == 160
+    assert sup["orgn_3d"] == 245
+    assert sup["pos_days_5d"] == 3
+
+    # 3. inquire-daily-indexchartprice (pct_change 계산) & ranking/fluctuation(acml_tr_pbmn 부재 시 close*vol)
+    kis._request_get = lambda path, tr_id, params: {
+        "rt_cd": "0",
+        "output2": [
+            {"stck_bsop_date": "20261127", "bstp_nmix_prpr": "4898.73"},
+            {"stck_bsop_date": "20261126", "bstp_nmix_prpr": "4711.21"},
+        ],
+    }
+    idx = kis.get_index_ohlcv(bars=10, end_date="2026-11-27")
+    assert list(idx["date"]) == ["2026-11-26", "2026-11-27"]
+    assert round(float(idx.iloc[-1]["chg_pct"]), 2) == 3.98
+
+    kis._request_get = lambda path, tr_id, params: {
+        "rt_cd": "0",
+        "output": [
+            {"stck_shrn_iscd": "084670", "hts_kor_isnm": "동양고속", "stck_prpr": "36900", "prdy_ctrt": "10.48", "acml_vol": "2258744"},
+            {"stck_shrn_iscd": "181710", "hts_kor_isnm": "NHN", "stck_prpr": "61300", "prdy_ctrt": "17.43", "acml_vol": "433182"},
+        ],
+    }
+    gainers = kis.get_top_gainers(top_n=10)
+    assert len(gainers) == 2
+    assert gainers[0]["code"] == "181710"
+    assert gainers[0]["trading_val"] > 0

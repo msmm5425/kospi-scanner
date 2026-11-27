@@ -34,7 +34,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Run KOSPI intraday scan
         env:
-          DATA_PROVIDER: ${{ vars.DATA_PROVIDER || 'pykrx' }}
+          DATA_PROVIDER: ${{ vars.DATA_PROVIDER }}
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           KIS_API_BASE_URL: ${{ vars.KIS_API_BASE_URL || 'https://openapi.koreainvestment.com:9443' }}

@@ -46,14 +46,23 @@ def get_dynamic_min_trading_val_krw(now_kst: datetime | None = None) -> int:
     return 3_000_000_000
 
 
+def _default_data_provider() -> str:
+    explicit = os.getenv("DATA_PROVIDER", "").strip().lower()
+    if explicit:
+        return explicit
+    if os.getenv("KIS_APP_KEY", "").strip() and os.getenv("KIS_APP_SECRET", "").strip():
+        return "kis"
+    if os.getenv("KB_APP_KEY", "").strip() and os.getenv("KB_APP_SECRET", "").strip():
+        return "kb"
+    return "pykrx"
+
+
 @dataclass(frozen=True)
 class Settings:
     """코스피 1:3 스윙 스캐너 전역 설정."""
 
-    # 프로바이더 및 인증
-    data_provider: str = field(
-        default_factory=lambda: os.getenv("DATA_PROVIDER", "pykrx").strip().lower()
-    )
+    # 프로바이더 및 인증 (DATA_PROVIDER 미지정 시 KIS 키 존재하면 자동 'kis')
+    data_provider: str = field(default_factory=_default_data_provider)
     kis_app_key: str = field(default_factory=lambda: os.getenv("KIS_APP_KEY", "").strip())
     kis_app_secret: str = field(default_factory=lambda: os.getenv("KIS_APP_SECRET", "").strip())
     kis_api_base_url: str = field(
