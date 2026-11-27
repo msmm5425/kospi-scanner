@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-27 17:04:15 KST",
+  "updated_at": "2026-11-27 17:12:43 KST",
   "patterns": [
     {
       "date": "2026-11-02",
@@ -1675,7 +1675,7 @@
       "date": "2026-11-27",
       "code": "004710",
       "name": "한솔테크닉스",
-      "chg_pct": 11.84,
+      "chg_pct": 12.24,
       "nearest_track": "TRACK_B_PULLBACK",
       "tags": [
         "SECTOR_SYNC"
@@ -1687,7 +1687,7 @@
       "date": "2026-11-27",
       "code": "009470",
       "name": "삼화전기",
-      "chg_pct": 24.67,
+      "chg_pct": 25.33,
       "nearest_track": "TRACK_B_PULLBACK",
       "tags": [
         "SECTOR_SYNC"
@@ -1699,7 +1699,7 @@
       "date": "2026-11-27",
       "code": "093370",
       "name": "후성",
-      "chg_pct": 11.7,
+      "chg_pct": 11.58,
       "nearest_track": "TRACK_B_PULLBACK",
       "tags": [
         "UPPER_SHADOW_ABSORB"
@@ -1711,7 +1711,7 @@
       "date": "2026-11-27",
       "code": "181710",
       "name": "NHN",
-      "chg_pct": 15.33,
+      "chg_pct": 15.71,
       "nearest_track": "TRACK_B_PULLBACK",
       "tags": [
         "UPPER_SHADOW_ABSORB"
