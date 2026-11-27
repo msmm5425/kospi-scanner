@@ -250,6 +250,17 @@ def test_common_stock_filter() -> None:
     assert is_eligible_common_stock("451700", "삼성스팩9호") is False
     assert is_eligible_common_stock("330590", "롯데리츠") is False
     assert is_eligible_common_stock("122630", "KODEX 레버리지") is False
+    assert is_eligible_common_stock("487240", "KODEX AI전력핵심설비") is False
+    assert is_eligible_common_stock("466920", "SOL 조선TOP3플러스") is False
+    assert is_eligible_common_stock("360750", "TIGER 미국S&P500") is False
+
+
+def test_premarket_early_window_classification() -> None:
+    from config.settings import classify_market_session
+
+    assert classify_market_session(datetime(2026, 11, 27, 7, 50, tzinfo=KST)) == "PREMARKET"
+    assert classify_market_session(datetime(2026, 11, 27, 9, 5, tzinfo=KST)) == "REGULAR"
+    assert classify_market_session(datetime(2026, 11, 27, 16, 40, tzinfo=KST)) == "AFTERMARKET"
 
 
 def test_rr_geometry_blue_sky_and_resistance_rejection() -> None:

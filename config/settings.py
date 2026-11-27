@@ -53,7 +53,7 @@ def classify_market_session(now_kst: datetime | None = None) -> str:
     if now_kst is None:
         return "REGULAR"
     t = now_kst.timetz().replace(tzinfo=None)
-    if dt_time(8, 0) <= t < dt_time(9, 0):
+    if t < dt_time(9, 0):
         return "PREMARKET"
     if dt_time(9, 0) <= t <= dt_time(15, 30):
         return "REGULAR"
@@ -154,8 +154,8 @@ class Settings:
     cooldown_trading_days: int = 5
     error_tracking_max_days: int = 10
     top20_lookback_trading_days: int = 7
-    scan_schedule_kst: tuple[str, ...] = ("08:00-12:25", "12:25-16:50", "16:50-21:00")
-    loop_interval_sec: int = 240
+    scan_schedule_kst: tuple[str, ...] = ("07:47-12:22", "12:13-16:47", "16:37-21:05")
+    loop_interval_sec: int = 120
     premarket_max_gap_over_ceiling_pct: float = 1.5
     analyze_time_kst: str = "15:50"
     weekly_report_time_kst: str = "금 16:30"

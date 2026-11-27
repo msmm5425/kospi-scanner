@@ -9,6 +9,12 @@ import pandas as pd
 from config.settings import settings
 
 _EXCLUDED_SUFFIX_RE = re.compile(r"(?:스팩\d*호|\d+호스팩|\d+우[A-Z]?|우선주|REITs?)$", re.IGNORECASE)
+_ETF_BRAND_PREFIXES: tuple[str, ...] = (
+    "KODEX ", "TIGER ", "SOL ", "ACE ", "RISE ", "PLUS ", "KBSTAR ", "HANARO ",
+    "ARIRANG ", "KOSEF ", "KIWOOM ", "TIMEFOLIO ", "KOACT ", "1Q ", "BNK ",
+    "HK ", "WON ", "VITA ", "FOCUS ", "TREX ", "SMART ", "MASTER ", "UNICORN ",
+    "TIME ", "TRUSTON ",
+)
 
 
 def is_eligible_common_stock(code: str, name: str = "") -> bool:
@@ -22,6 +28,8 @@ def is_eligible_common_stock(code: str, name: str = "") -> bool:
         return True
 
     upper_n = n.upper()
+    if upper_n.startswith(_ETF_BRAND_PREFIXES):
+        return False
     for kw in settings.excluded_name_keywords:
         if kw.upper() in upper_n:
             return False

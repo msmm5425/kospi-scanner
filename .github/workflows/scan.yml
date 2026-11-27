@@ -2,13 +2,13 @@ name: KOSPI 08:00-21:00 Continuous Swing Scan
 
 on:
   schedule:
-    # 평일(KST 월~금) 08:00~21:00 무중단 3교대 릴레이 (UTC = KST - 9h)
-    # 1교대: 08:00 KST (전일 23:00 UTC, 일~목 = 0-4) -> ~12:20 KST
-    - cron: "0 23 * * 0-4"
-    # 2교대: 12:25 KST (03:25 UTC, 월~금 = 1-5) -> ~16:45 KST
-    - cron: "25 3 * * 1-5"
-    # 3교대: 16:50 KST (07:50 UTC, 월~금 = 1-5) -> 21:00 KST 종료
-    - cron: "50 7 * * 1-5"
+    # 평일(KST 월~금) 08:00~21:00 무중단 3교대 릴레이 (비혼잡 분 오프셋 + 교대 10~13분 전 선행 기동)
+    # 1교대: 07:47 KST (전일 22:47 UTC, 일~목 = 0-4) -> 12:22 KST 인계
+    - cron: "47 22 * * 0-4"
+    # 2교대: 12:13 KST (03:13 UTC, 월~금 = 1-5) -> 16:47 KST 인계
+    - cron: "13 3 * * 1-5"
+    # 3교대: 16:37 KST (07:37 UTC, 월~금 = 1-5) -> 21:05 KST 종료
+    - cron: "37 7 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -76,6 +76,13 @@ jobs:
           KOSPI_TELEGRAM_TOKEN: ${{ secrets.KOSPI_TELEGRAM_TOKEN }}
           KOSPI_TELEGRAM_CHAT_ID: ${{ secrets.KOSPI_TELEGRAM_CHAT_ID }}
         run: |
+          if [ "${{ github.event.schedule }}" = "47 22 * * 0-4" ]; then
+            SHIFT_END="12:22"
+          elif [ "${{ github.event.schedule }}" = "13 3 * * 1-5" ]; then
+            SHIFT_END="16:47"
+          else
+            SHIFT_END="21:05"
+          fi
           if [ "${{ github.event.inputs.single_scan }}" = "true" ]; then
             if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
               python main_scan.py --dry-run
@@ -84,9 +91,9 @@ jobs:
             fi
           else
             if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-              python main_scan.py --loop --interval-sec 240 --max-minutes 260 --end-kst 21:05 --dry-run
+              python main_scan.py --loop --interval-sec 120 --max-minutes 280 --end-kst "$SHIFT_END" --dry-run
             else
-              python main_scan.py --loop --interval-sec 240 --max-minutes 260 --end-kst 21:05 --git-sync
+              python main_scan.py --loop --interval-sec 120 --max-minutes 280 --end-kst "$SHIFT_END" --git-sync
             fi
           fi
       - name: Final state sync commit

@@ -67,6 +67,9 @@ def fetch_naver_kospi_universe(
 
         page_max_cap = 0.0
         for row in stocks:
+            stock_end_type = str(row.get("stockEndType") or "").strip().lower()
+            if stock_end_type and stock_end_type != "stock":
+                continue
             code = str(row.get("itemCode") or row.get("reutersCode") or "").zfill(6)
             name = str(row.get("stockName") or "").strip()
             marcap = _parse_num(row.get("marketValueRaw"))
@@ -147,6 +150,9 @@ def fetch_naver_top_gainers(
             break
 
         for row in stocks:
+            stock_end_type = str(row.get("stockEndType") or "").strip().lower()
+            if stock_end_type and stock_end_type != "stock":
+                continue
             code = str(row.get("itemCode") or row.get("reutersCode") or "").zfill(6)
             name = str(row.get("stockName") or "").strip()
             if code in seen or not is_eligible_common_stock(code, name):

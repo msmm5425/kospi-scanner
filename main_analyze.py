@@ -48,7 +48,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[ANALYZE 스킵] 오늘은 KRX 휴장일/비개장일입니다 (오늘={today_kst}, 최근 거래일={latest_idx_date}).")
             return 0
 
-    if args.bootstrap_if_empty and not default_repo.get_signals():
+    has_bootstrapped = bool(default_repo.get_signals()) or bool(default_repo.load_top20_doc().get("history"))
+    if args.bootstrap_if_empty and not has_bootstrapped:
         boot_res = run_bootstrap_learning(
             provider=provider,
             storage=default_repo,

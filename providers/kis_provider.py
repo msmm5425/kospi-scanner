@@ -125,7 +125,7 @@ class KISProvider(MarketDataProvider):
         self._lock = threading.RLock()
         self._session = requests.Session()
         self._last_req_ts = 0.0
-        self._min_interval_sec = 0.16  # KIS 실전 앱키 버스트(EGW00201) 방지 안전 간격 (~6 req/s)
+        self._min_interval_sec = 0.10  # KIS 실전 앱키 초당 20건 한도 내 고속 스캔 간격 (~10 req/s)
         self._token: str = ""
         self._token_expire_ts: float = 0.0
         self._token_issued_date_kst: str = ""

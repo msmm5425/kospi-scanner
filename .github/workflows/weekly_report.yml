@@ -2,8 +2,8 @@ name: KOSPI Friday Weekly Report
 
 on:
   schedule:
-    # 금요일 16:30 KST (UTC 07:30)
-    - cron: "30 7 * * 5"
+    # 금요일 16:27 KST (UTC 07:27, 정시 :30 혼잡 회피)
+    - cron: "27 7 * * 5"
   workflow_dispatch:
     inputs:
       dry_run:

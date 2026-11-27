@@ -2,8 +2,8 @@ name: KOSPI 15:50 Error Log & TOP20 Analyze
 
 on:
   schedule:
-    # 평일 15:50 KST (UTC 06:50)
-    - cron: "50 6 * * 1-5"
+    # 평일 15:47 KST (UTC 06:47, 정시 :50 혼잡 회피)
+    - cron: "47 6 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
