@@ -632,6 +632,7 @@ class KISProvider(MarketDataProvider):
 
         all_rows: list[dict[str, Any]] = []
         cursor_end = end_dt
+        prev_oldest = ""
         try:
             for _ in range(4):
                 cursor_start = cursor_end - timedelta(days=140)
@@ -651,8 +652,9 @@ class KISProvider(MarketDataProvider):
                     break
                 all_rows.extend(chunk)
                 oldest = min(str(r.get("stck_bsop_date") or "") for r in chunk if r.get("stck_bsop_date"))
-                if not oldest or len(all_rows) >= (bars + 5):
+                if not oldest or oldest == prev_oldest or len(all_rows) >= (bars + 5):
                     break
+                prev_oldest = oldest
                 cursor_end = datetime.strptime(oldest, "%Y%m%d").date() - timedelta(days=1)
         except Exception as e:
             logger.warning("KIS %s 지수 일봉 조회 실패 — Naver fchart 폴백 시도: %s", mkt, e)

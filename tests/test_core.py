@@ -1420,19 +1420,20 @@ def test_kosdaq_dual_market_universe_index_and_liquidity_cutoffs(tmp_path) -> No
     kis.app_secret = "s"
 
     def _fake_get(path: str, tr_id: str, params: dict[str, Any]) -> dict[str, Any]:
-        seen_iscd.append(str(params.get("FID_INPUT_ISCD")))
-        return {
-            "rt_cd": "0",
-            "output2": [
-                {"stck_bsop_date": "20261127", "bstp_nmix_prpr": "708.99" if params.get("FID_INPUT_ISCD") == "1001" else "4915.00"},
-                {"stck_bsop_date": "20261126", "bstp_nmix_prpr": "690.00" if params.get("FID_INPUT_ISCD") == "1001" else "4711.00"},
-            ],
-        }
+        iscd = str(params.get("FID_INPUT_ISCD"))
+        end_ymd = str(params.get("FID_INPUT_DATE_2") or "99999999")
+        seen_iscd.append(iscd)
+        rows = [
+            {"stck_bsop_date": "20261127", "bstp_nmix_prpr": "708.99" if iscd == "1001" else "4915.00"},
+            {"stck_bsop_date": "20261126", "bstp_nmix_prpr": "690.00" if iscd == "1001" else "4711.00"},
+        ]
+        filtered = [r for r in rows if r["stck_bsop_date"] <= end_ymd]
+        return {"rt_cd": "0", "output2": filtered}
 
     kis._request_get = _fake_get  # type: ignore[method-assign]
     assert float(kis.get_index_ohlcv(bars=5, market="KOSDAQ").iloc[-1]["close"]) == 708.99
     assert float(kis.get_index_ohlcv(bars=5, market="KOSPI").iloc[-1]["close"]) == 4915.0
-    assert seen_iscd == ["1001", "0001"]
+    assert seen_iscd[0] == "1001" and "0001" in seen_iscd and set(seen_iscd) == {"1001", "0001"}
 
     # run_scan에서 KOSDAQ 종목은 거래대금 30억 기준(20억 탈락) 및 KOSDAQ 지수 약세 별도 반영 검증
     dates = _trading_dates(160, end="2026-11-27")
