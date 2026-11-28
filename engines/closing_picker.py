@@ -73,7 +73,7 @@ def _closing_audit_single(
         reasons.extend(gate_res["failed_reasons"])
 
     if gate_res["market_regime"] == "WEAK":
-        eff_min_rr = max(base_min_rr, float(adaptive.get("weak_regime_min_rr", 3.5)))
+        eff_min_rr = max(base_min_rr, float(adaptive.get("weak_regime_min_rr", settings.weak_regime_min_rr)))
         eff_risk_mult = t_risk_mult * float(adaptive.get("weak_regime_risk_mult", 1.0))
     else:
         eff_min_rr = base_min_rr
@@ -94,7 +94,7 @@ def _closing_audit_single(
         closing_upside = round(((float(nearest_res) - closing_tick) / closing_tick) * 100.0, 2) if closing_tick > 0 else 0.0
 
     if closing_upside < settings.min_clear_upside_pct:
-        reasons.append(f"상단 여력 부족 (+{closing_upside:.1f}% < +10%)")
+        reasons.append(f"상단 여력 부족 (+{closing_upside:.1f}% < +{settings.min_clear_upside_pct:.1f}%)")
 
     closing_rr = round(closing_upside / closing_risk, 2) if closing_risk > 0 else 0.0
     if closing_rr < eff_min_rr:

@@ -594,14 +594,16 @@ def test_auto_learner_adaptation_track_d_and_phase4(tmp_path) -> None:
         }
     )
 
+    from config.settings import settings
+
     res = run_auto_learning(storage=store, as_of_date="2026-12-27")
     ap = res["adaptive_params"]
     assert res["cohort_mode"] == "LIVE_ONLY"
-    assert ap["max_upper_wick_ratio"] < 0.40
-    assert ap["min_projected_rr"] > 3.0
-    assert ap["weak_regime_min_rr"] > 3.5
+    assert ap["max_upper_wick_ratio"] < settings.max_upper_wick_ratio
+    assert ap["min_projected_rr"] > settings.min_projected_rr
+    assert ap["weak_regime_min_rr"] > settings.weak_regime_min_rr
     assert ap["track_risk_mult"]["TRACK_B_PULLBACK"] < 1.0
-    assert ap["track_a_dry_vol_ratio_max"] > 0.60
+    assert ap["track_a_dry_vol_ratio_max"] > settings.track_a_dry_vol_ratio_max
     assert "GAP_BREAKAWAY" in res["promoted_track_d_patterns"]
     assert res["just_activated_phase4"] is True
     assert res["phase4_policy"]["phase4_active"] is True
@@ -1242,3 +1244,86 @@ def test_parallel_scanner_early_safety_filter_and_kis_thread_safety(monkeypatch)
     assert "100002" in safety_calls
     assert "100002" not in ohlcv_calls
     assert "100001" in ohlcv_calls
+
+
+def test_quant_relaxed_thresholds_capture_real_breakouts() -> None:
+    from strategies.common_gate import evaluate_common_gate
+    from strategies.track_a_vcp import evaluate_track_a
+    from strategies.track_b_pullback import evaluate_track_b
+    from strategies.track_c_turnaround import evaluate_track_c
+
+    dates = _trading_dates(160, end="2026-11-27")
+    idx_df = _make_index_df(dates, weak=False)
+    sup_2d = {"frgn_today": 10_000, "orgn_today": -2_000, "frgn_3d": 20_000, "orgn_3d": 0, "total_5d": 25_000, "pos_days_5d": 2, "intraday_pending": False}
+
+    # 1. Track A + Common Gate: +1.3% 돌파, 거래량 138%, 고갈 65%, 피벗 근접 97%, 윗꼬리 0.44
+    df_a = _make_track_a_vcp_df(dates)
+    for k in range(len(df_a) - 6, len(df_a) - 1):
+        df_a.loc[k, "volume"] = 65_000.0
+    df_a.loc[len(df_a) - 8, "high"] = round_to_tick(float(df_a.loc[len(df_a) - 8, "high"]) * 1.028)
+    prev_c = float(df_a.iloc[-2]["close"])
+    o_a = round_to_tick(prev_c * 1.001)
+    c_a = round_to_tick(prev_c * 1.013)
+    h_a = round_to_tick(c_a + (c_a - o_a) * 0.72)  # 윗꼬리 비율 ~0.42 <= 0.46
+    l_a = o_a
+    vol_a = 136_000.0
+    df_a.loc[df_a.index[-1], ["open", "high", "low", "close", "volume", "amount"]] = [o_a, h_a, l_a, c_a, vol_a, c_a * vol_a]
+    df_a_ind = compute_indicators(df_a)
+    gate_a = evaluate_common_gate(df_a_ind, idx_df, trading_val=float(df_a_ind.iloc[-1]["amount"]), marcap_krw=5e11)
+    assert gate_a["passed"] is True, gate_a["failed_reasons"]
+    res_a = evaluate_track_a(df_a_ind, sup_2d)
+    assert res_a["passed"] is True, res_a["failed_reasons"]
+
+    # 2. Track B: +8.0% (2.0x) 기준봉, 일시적 중심-2% 흔들기 후 회복, 전일비 122% 재점화
+    df_b = _make_track_b_pullback_df(dates)
+    anchor_i = len(df_b) - 6
+    anchor_prev_c = float(df_b.iloc[anchor_i - 1]["close"])
+    b_o = round_to_tick(anchor_prev_c * 1.005)
+    b_c = round_to_tick(anchor_prev_c * 1.080)
+    b_h = round_to_tick(b_c * 1.006)
+    b_l = round_to_tick(b_o * 0.995)
+    b_v = 160_000.0
+    df_b.loc[anchor_i, ["open", "high", "low", "close", "volume", "amount"]] = [b_o, b_h, b_l, b_c, b_v, b_c * b_v]
+    anchor_mid = (b_o + b_c) / 2.0
+    for k in range(anchor_i + 1, len(df_b) - 1):
+        sub_c = round_to_tick(anchor_mid * (0.982 if k == len(df_b) - 3 else 1.002))
+        df_b.loc[k, ["open", "high", "low", "close", "volume", "amount"]] = [
+            round_to_tick(sub_c * 1.003),
+            round_to_tick(sub_c * 1.006),
+            round_to_tick(sub_c * 0.996),
+            sub_c,
+            78_000.0,
+            sub_c * 78_000.0,
+        ]
+    last_b_prev = float(df_b.iloc[-2]["close"])
+    last_b_c = round_to_tick(max(anchor_mid * 1.015, last_b_prev * 1.025))
+    df_b.loc[df_b.index[-1], ["open", "high", "low", "close", "volume", "amount"]] = [
+        round_to_tick(last_b_prev * 1.002),
+        round_to_tick(last_b_c * 1.003),
+        round_to_tick(last_b_prev * 0.998),
+        last_b_c,
+        96_000.0,
+        last_b_c * 96_000.0,
+    ]
+    res_b = evaluate_track_b(compute_indicators(df_b), sup_2d)
+    assert res_b["passed"] is True, res_b["failed_reasons"]
+
+    # 3. Track C: 5일 중 2일 수급 + 135% 돌파 거래량
+    df_c = _make_track_c_turnaround_df(dates)
+    df_c_base_ind = compute_indicators(df_c)
+    vma_c = float(df_c_base_ind.iloc[-1]["vol_ma20_prev"])
+    df_c.loc[df_c.index[-1], "volume"] = round(vma_c * 1.38)
+    df_c.loc[df_c.index[-1], "amount"] = float(df_c.loc[df_c.index[-1], "close"]) * float(df_c.loc[df_c.index[-1], "volume"])
+    res_c = evaluate_track_c(compute_indicators(df_c), sup_2d)
+    assert res_c["passed"] is True, res_c["failed_reasons"]
+
+    # 4. R:R 기하학: +12.5% 매물대 저항 & -5.0% 손절 -> R:R ~2.50 (2.3+ 통과), -5.6% 손절 -> ~2.23 탈락
+    df_rr = _make_track_a_vcp_df(dates)
+    entry_rr = float(df_rr.iloc[-1]["close"])
+    df_rr.loc[len(df_rr) - 35, "volume"] = 500_000.0
+    df_rr.loc[len(df_rr) - 35, "high"] = round_to_tick(entry_rr * 1.125, mode="up")
+    df_rr_ind = compute_indicators(df_rr)
+    rr_pass = evaluate_rr_geometry(df_rr_ind, entry_rr, entry_rr * 0.95, "TRACK_A_VCP")
+    assert rr_pass["passed"] is True, rr_pass["failed_reasons"]
+    rr_fail = evaluate_rr_geometry(df_rr_ind, entry_rr, entry_rr * 0.942, "TRACK_A_VCP")
+    assert rr_fail["passed"] is False

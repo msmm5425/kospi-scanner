@@ -30,7 +30,7 @@ def evaluate_track_b(
     df: pd.DataFrame,
     supply: dict[str, Any],
 ) -> dict[str, Any]:
-    """Track B: 기준봉(+9.5%, 거래량 250%+) 후 저위험 눌림목 재점화 (Qullamaggie / O'Neil)."""
+    """Track B: 기준봉(+7.5%, 거래량 180%+) 후 저위험 눌림목 재점화 (Qullamaggie / O'Neil)."""
     total_checks = 5
     if df is None or len(df) < 35:
         return {
@@ -51,6 +51,7 @@ def evaluate_track_b(
     vol_today = float(row["volume"])
     prev_vol = float(prev_row["volume"])
     ma5_today = float(row["ma5"]) if pd.notna(row["ma5"]) else 0.0
+    ma20_today = float(row["ma20"]) if pd.notna(row["ma20"]) else 0.0
     obv_today = float(row["obv"])
 
     # 1. 직전 4~15거래일 내 기준봉 탐색
@@ -91,6 +92,7 @@ def evaluate_track_b(
 
     anchor = df.iloc[anchor_idx]
     anchor_mid = (float(anchor["open"]) + float(anchor["close"])) / 2.0
+    anchor_low = float(anchor["low"])
     anchor_vol = float(anchor["volume"])
     anchor_obv = float(anchor["obv"])
     anchor_prev_obv = float(df["obv"].iloc[anchor_idx - 1]) if anchor_idx > 0 else anchor_obv
@@ -98,20 +100,22 @@ def evaluate_track_b(
     adj_df = df.iloc[anchor_idx + 1 : last_idx]
     failed: list[str] = []
 
-    # 2. 건전한 조정 (조정 기간 종가가 기준봉 중심값 및 20MA 미이탈)
+    # 2. 건전한 조정 (일시적 -4% 이내 흔들기는 허용하되 기준봉 저가·중심대 및 20MA 위 재회복 필수)
     min_adj_close = float(adj_df["close"].min())
     adj_low_min = float(adj_df["low"].min())
-    ma20_ok = bool((adj_df["close"] >= adj_df["ma20"]).all())
-    mid_ok = min_adj_close >= anchor_mid
-    if not (ma20_ok and mid_ok):
+    support_floor = max(anchor_low * 0.99, anchor_mid * 0.96)
+    ma20_adj_ok = bool((adj_df["close"] >= adj_df["ma20"] * 0.975).all())
+    ma20_reclaim_ok = ma20_today <= 0 or close_today >= ma20_today
+    mid_ok = min_adj_close >= support_floor and close_today >= (anchor_mid * 0.975)
+    if not (ma20_adj_ok and ma20_reclaim_ok and mid_ok):
         adj_fails = []
         if not mid_ok:
             adj_fails.append(f"종가 기준봉 중심({anchor_mid:,.0f}) 이탈")
-        if not ma20_ok:
+        if not (ma20_adj_ok and ma20_reclaim_ok):
             adj_fails.append("조정 중 20MA 이탈")
         failed.append(" / ".join(adj_fails))
 
-    # 3. 거래량 건조 (조정 기간 평균 거래량 <= 기준봉 거래량의 45%)
+    # 3. 거래량 건조 (조정 기간 평균 거래량 <= 기준봉 거래량의 기준 비율)
     adj_vol_mean = float(adj_df["volume"].mean())
     adj_vol_ratio = (adj_vol_mean / anchor_vol) if anchor_vol > 0 else 9.9
     if adj_vol_ratio > settings.track_b_adj_max_vol_vs_anchor:
@@ -119,7 +123,7 @@ def evaluate_track_b(
             f"조정 거래량 건조 미흡 ({adj_vol_ratio * 100:.0f}% > {settings.track_b_adj_max_vol_vs_anchor * 100:.0f}%)"
         )
 
-    # 4. 저위험 재점화 (5MA 또는 하락추세선 돌파 + 전일 대비 거래량 150% 이상)
+    # 4. 저위험 재점화 (5MA 또는 하락추세선 돌파 + 전일 대비 거래량 확장)
     trend_ok = (ma5_today > 0 and close_today >= ma5_today) or _desc_trendline_broken(adj_df, close_today)
     vol_reignite_ratio = (vol_today / prev_vol) if prev_vol > 0 else 0.0
     if not (trend_ok and vol_reignite_ratio >= settings.track_b_reignite_min_vol_vs_prev):
@@ -127,16 +131,19 @@ def evaluate_track_b(
         if not trend_ok:
             re_fails.append("5MA/추세선 재돌파 미완")
         if vol_reignite_ratio < settings.track_b_reignite_min_vol_vs_prev:
-            re_fails.append(f"전일비 거래량 {vol_reignite_ratio * 100:.0f}% < 150%")
+            re_fails.append(
+                f"전일비 거래량 {vol_reignite_ratio * 100:.0f}% < {settings.track_b_reignite_min_vol_vs_prev * 100:.0f}%"
+            )
         failed.append(" / ".join(re_fails))
 
-    # 5. 조정 중 OBV 훼손 없음 + 최근 3일 외인·기관 순매수 전환
-    obv_intact = float(adj_df["obv"].min()) >= anchor_prev_obv and obv_today >= anchor_prev_obv
+    # 5. 당일 OBV 회복 유지 + 외인·기관 순매수 전환
+    obv_intact = obv_today >= anchor_prev_obv
     frgn_3d = int(supply.get("frgn_3d", 0))
     orgn_3d = int(supply.get("orgn_3d", 0))
     frgn_today = int(supply.get("frgn_today", 0))
     orgn_today = int(supply.get("orgn_today", 0))
-    supply_ok = (frgn_3d + orgn_3d > 0) or (frgn_today + orgn_today > 0)
+    total_5d = int(supply.get("total_5d", 0))
+    supply_ok = (frgn_3d + orgn_3d > 0) or (frgn_today + orgn_today > 0) or (total_5d > 0)
     if not (obv_intact and supply_ok):
         s_fails = []
         if not obv_intact:

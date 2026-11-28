@@ -35,7 +35,7 @@ def _eval_single_pattern(pat: str, df: pd.DataFrame, supply: dict[str, Any]) -> 
     if pat == "BB_EXTREME_SQUEEZE":
         bb_pct = compute_bb_squeeze_percentile(df.iloc[:-1], window=60)
         bb_upper = float(row["bb_upper"]) if pd.notna(row.get("bb_upper")) else 0.0
-        if bb_pct is not None and bb_pct <= 15.0 and bb_upper > 0 and close_today >= (bb_upper * 0.995) and vol_ratio >= 1.60:
+        if bb_pct is not None and bb_pct <= 20.0 and bb_upper > 0 and close_today >= (bb_upper * 0.99) and vol_ratio >= 1.30:
             inval = min(low_5d, close_today - (1.5 * atr14))
             return {"invalidation_raw": round(inval, 2), "metrics": {"bb_pct": bb_pct, "vol_ratio_x": round(vol_ratio, 2)}}
 
@@ -43,7 +43,7 @@ def _eval_single_pattern(pat: str, df: pd.DataFrame, supply: dict[str, Any]) -> 
         orgn_series = supply.get("orgn_series") or []
         pos_orgn = sum(1 for x in orgn_series[-5:] if x > 0)
         pos_days = int(supply.get("pos_days_5d", 0))
-        if (pos_orgn >= 4 or (pos_days >= 3 and int(supply.get("total_5d", 0)) > 0)) and close_today >= (high_5d * 0.99) and vol_ratio >= 1.50:
+        if (pos_orgn >= 3 or (pos_days >= 2 and int(supply.get("total_5d", 0)) > 0)) and close_today >= (high_5d * 0.985) and vol_ratio >= 1.25:
             return {"invalidation_raw": round(low_5d, 2), "metrics": {"pos_orgn_5d": pos_orgn, "vol_ratio_x": round(vol_ratio, 2)}}
 
     elif pat == "MA_CONVERGENCE":
@@ -55,14 +55,14 @@ def _eval_single_pattern(pat: str, df: pd.DataFrame, supply: dict[str, Any]) -> 
         ma60 = float(row["ma60"]) if pd.notna(row.get("ma60")) else 0.0
         if ma5_p > 0 and ma20_p > 0 and ma60_p > 0:
             spread = (max(ma5_p, ma20_p, ma60_p) / min(ma5_p, ma20_p, ma60_p)) - 1.0
-            if spread <= 0.035 and close_today >= max(ma5, ma20, ma60) and vol_ratio >= 1.60:
+            if spread <= 0.045 and close_today >= max(ma5, ma20, ma60) and vol_ratio >= 1.30:
                 inval = min(low_5d, close_today - (1.5 * atr14))
                 return {"invalidation_raw": round(inval, 2), "metrics": {"ma_spread_pct": round(spread * 100, 2), "vol_ratio_x": round(vol_ratio, 2)}}
 
     elif pat == "GAP_BREAKAWAY":
         gap_pct = ((open_today - prev_close) / prev_close * 100.0) if prev_close > 0 else 0.0
         wick = float(row.get("upper_wick_ratio", 1.0))
-        if gap_pct >= 2.5 and close_today > open_today and wick <= 0.30 and vol_ratio >= 1.80:
+        if gap_pct >= 2.0 and close_today > open_today and wick <= 0.35 and vol_ratio >= 1.40:
             inval = max(low_today, prev_close * 0.96)
             return {"invalidation_raw": round(inval, 2), "metrics": {"gap_pct": round(gap_pct, 2), "vol_ratio_x": round(vol_ratio, 2)}}
 
@@ -71,9 +71,9 @@ def _eval_single_pattern(pat: str, df: pd.DataFrame, supply: dict[str, Any]) -> 
         absorb_cnt = 0
         for _, bar in pre_10.iterrows():
             vma = float(bar.get("vol_ma20_prev") or bar.get("vol_ma20") or 0.0)
-            if float(bar.get("upper_wick_ratio", 0.0)) >= 0.35 and vma > 0 and float(bar["volume"]) >= (vma * 1.5):
+            if float(bar.get("upper_wick_ratio", 0.0)) >= 0.32 and vma > 0 and float(bar["volume"]) >= (vma * 1.3):
                 absorb_cnt += 1
-        if absorb_cnt >= 2 and close_today >= (high_5d * 0.99) and vol_ratio >= 1.60:
+        if absorb_cnt >= 2 and close_today >= (high_5d * 0.985) and vol_ratio >= 1.30:
             return {"invalidation_raw": round(low_5d, 2), "metrics": {"absorb_cnt": absorb_cnt, "vol_ratio_x": round(vol_ratio, 2)}}
 
     return None

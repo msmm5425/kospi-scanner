@@ -351,7 +351,7 @@ def run_scan(
         t_risk_mult = float((adaptive.get("track_risk_mult") or {}).get(tr_group, 1.0))
         base_min_rr = float(adaptive.get("min_projected_rr", settings.min_projected_rr))
         if gate_res["market_regime"] == "WEAK":
-            eff_min_rr = max(base_min_rr, float(adaptive.get("weak_regime_min_rr", 3.5)))
+            eff_min_rr = max(base_min_rr, float(adaptive.get("weak_regime_min_rr", settings.weak_regime_min_rr)))
             eff_risk_mult = t_risk_mult * float(adaptive.get("weak_regime_risk_mult", 1.0))
         else:
             eff_min_rr = base_min_rr

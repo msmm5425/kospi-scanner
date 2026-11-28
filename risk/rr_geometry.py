@@ -17,7 +17,7 @@ def _max_risk_limit_for_track(track: str) -> float:
     if "TRACK_C" in t:
         return settings.track_c_max_risk_pct
     if "TRACK_D" in t:
-        return 5.5
+        return settings.track_a_max_risk_pct
     return settings.track_c_max_risk_pct
 
 

@@ -46,25 +46,29 @@ def evaluate_track_c(
     if drawdown_ratio > settings.track_c_max_ratio_to_120h or box_range_20 > settings.track_c_box_20d_range_max:
         b_fails = []
         if drawdown_ratio > settings.track_c_max_ratio_to_120h:
-            b_fails.append(f"120일 고점 대비 조정 부족({drawdown_ratio * 100:.0f}% > 85%)")
+            b_fails.append(
+                f"120일 고점 대비 조정 부족({drawdown_ratio * 100:.0f}% > {settings.track_c_max_ratio_to_120h * 100:.0f}%)"
+            )
         if box_range_20 > settings.track_c_box_20d_range_max:
-            b_fails.append(f"20일 박스권 폭 과다({box_range_20 * 100:.1f}% > 25%)")
+            b_fails.append(
+                f"20일 박스권 폭 과다({box_range_20 * 100:.1f}% > {settings.track_c_box_20d_range_max * 100:.0f}%)"
+            )
         failed.append(" / ".join(b_fails))
 
-    # 2. OBV 선행 돌파 (주가는 40일 고점 아래이나 OBV가 40일 신고가 선행 돌파)
+    # 2. OBV 선행 돌파 (주가는 40일 박스 상단+2% 이내이나 OBV가 40일 신고가 선행 돌파)
     pre_40 = df.iloc[-41:-1]
     high_40d = float(pre_40["high"].max())
     obv_40d_max = float(pre_40["obv"].max())
     obv_today = float(row["obv"])
-    if not (close_today < high_40d and obv_today > obv_40d_max):
+    if not (close_today <= high_40d * 1.02 and obv_today > obv_40d_max):
         obv_fails = []
-        if close_today >= high_40d:
-            obv_fails.append("주가 이미 40일 고점 이상")
+        if close_today > high_40d * 1.02:
+            obv_fails.append("주가 이미 40일 고점 +2% 이상 이격")
         if obv_today <= obv_40d_max:
             obv_fails.append("OBV 40일 신고가 선행 돌파 미달")
         failed.append(" / ".join(obv_fails))
 
-    # 3. 연속 수급 (최근 5거래일 중 외인·기관 합산 순매수일 3일 이상 + 5일 합산 순매수 양수)
+    # 3. 연속 수급 (최근 5거래일 중 외인·기관 합산 순매수일 2일 이상 + 5일 합산 순매수 양수)
     pos_days_5d = int(supply.get("pos_days_5d", 0))
     total_5d = int(supply.get("total_5d", 0))
     if pos_days_5d < settings.track_c_supply_pos_days_min or total_5d <= 0:
@@ -72,22 +76,32 @@ def evaluate_track_c(
             f"5일 연속 수급 부족 ({pos_days_5d}일 순매수, 합계 {total_5d:+,}주)"
         )
 
-    # 4. 추세 전환 (당일 종가가 60MA 또는 120MA를 직전 20일 평균 대비 180% 이상 거래량으로 첫 돌파)
+    # 4. 추세 전환 (당일 또는 전일 60MA/120MA 상향 돌파 안착 + 직전 20일 평균 대비 기준 거래량 이상)
+    prev2 = df.iloc[-3]
+    prev2_close = float(prev2["close"])
     ma60 = float(row["ma60"]) if pd.notna(row["ma60"]) else 0.0
     prev_ma60 = float(prev["ma60"]) if pd.notna(prev["ma60"]) else 0.0
+    prev2_ma60 = float(prev2["ma60"]) if pd.notna(prev2["ma60"]) else 0.0
     ma120 = float(row["ma120"]) if pd.notna(row["ma120"]) else 0.0
     prev_ma120 = float(prev["ma120"]) if pd.notna(prev["ma120"]) else 0.0
+    prev2_ma120 = float(prev2["ma120"]) if pd.notna(prev2["ma120"]) else 0.0
 
-    cross_60 = ma60 > 0 and prev_ma60 > 0 and prev_close < prev_ma60 and close_today >= ma60
-    cross_120 = ma120 > 0 and prev_ma120 > 0 and prev_close < prev_ma120 and close_today >= ma120
+    cross_60_today = ma60 > 0 and prev_ma60 > 0 and prev_close < prev_ma60 and close_today >= ma60
+    cross_120_today = ma120 > 0 and prev_ma120 > 0 and prev_close < prev_ma120 and close_today >= ma120
+    cross_60_prev = ma60 > 0 and prev2_ma60 > 0 and prev2_close < prev2_ma60 and prev_close >= prev_ma60 and close_today >= ma60
+    cross_120_prev = ma120 > 0 and prev2_ma120 > 0 and prev2_close < prev2_ma120 and prev_close >= prev_ma120 and close_today >= ma120
+    cross_60 = cross_60_today or cross_60_prev
+    cross_120 = cross_120_today or cross_120_prev
     vol_ratio = (vol_today / vol_ma20_prev) if vol_ma20_prev > 0 else 0.0
 
     if not ((cross_60 or cross_120) and vol_ratio >= settings.track_c_breakout_vol_ratio_min):
         t_fails = []
         if not (cross_60 or cross_120):
-            t_fails.append("60/120일선 첫 상향 돌파 미발생")
+            t_fails.append("60/120일선 상향 돌파 미발생")
         if vol_ratio < settings.track_c_breakout_vol_ratio_min:
-            t_fails.append(f"돌파 거래량 {vol_ratio * 100:.0f}% < 180%")
+            t_fails.append(
+                f"돌파 거래량 {vol_ratio * 100:.0f}% < {settings.track_c_breakout_vol_ratio_min * 100:.0f}%"
+            )
         failed.append(" / ".join(t_fails))
 
     box_low_10d = float(df.iloc[-11:-1]["low"].min())

@@ -13,10 +13,10 @@
     "cohort_mode": "LIVE_PLUS_BOOTSTRAP"
   },
   "adaptive_params": {
-    "max_upper_wick_ratio": 0.4,
-    "max_disparity_20_pct": 118.0,
-    "min_projected_rr": 3.0,
-    "weak_regime_min_rr": 3.5,
+    "max_upper_wick_ratio": 0.46,
+    "max_disparity_20_pct": 120.0,
+    "min_projected_rr": 2.3,
+    "weak_regime_min_rr": 2.6,
     "weak_regime_risk_mult": 1.0,
     "track_risk_mult": {
       "TRACK_A_VCP": 1.0,
@@ -24,7 +24,7 @@
       "TRACK_C_TURNAROUND": 1.0,
       "TRACK_D": 1.0
     },
-    "track_a_dry_vol_ratio_max": 0.6,
+    "track_a_dry_vol_ratio_max": 0.75,
     "track_weights": {
       "TRACK_A_VCP": 1.0,
       "TRACK_B_PULLBACK": 1.0,

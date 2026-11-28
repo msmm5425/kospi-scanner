@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from config.settings import KST
+from config.settings import KST, settings
 from storage.repo import StorageRepo, repo as default_repo
 
 EXECUTABLE_TRACK_D_PATTERNS: tuple[str, ...] = (
@@ -49,8 +49,8 @@ def _adjust_wick_and_rr(
     if len(effective_completed) < MIN_EFFECTIVE_SAMPLES:
         return
 
-    # 1. FAKEOUT_WICK 승패 대칭 검사 -> max_upper_wick_ratio 보정 [0.28, 0.42]
-    curr_wick = float(params.get("max_upper_wick_ratio", 0.40))
+    # 1. FAKEOUT_WICK 승패 대칭 검사 -> max_upper_wick_ratio 보정 [0.30, 0.50]
+    curr_wick = float(params.get("max_upper_wick_ratio", settings.max_upper_wick_ratio))
     if losses:
         loss_fake_cnt = sum(1 for s in losses if "FAKEOUT_WICK" in (s.get("error_tags") or []))
         loss_fake_rate = loss_fake_cnt / len(losses)
@@ -71,33 +71,33 @@ def _adjust_wick_and_rr(
     )
 
     if loss_fake_cnt >= 3 and loss_fake_rate >= 0.40 and win_high_wick_rate < (loss_fake_rate * 0.5):
-        new_wick = _clamp(curr_wick - 0.02, 0.28, 0.42)
+        new_wick = _clamp(curr_wick - 0.02, 0.30, 0.50)
         if new_wick != curr_wick:
             params["max_upper_wick_ratio"] = new_wick
             adjustments.append(
                 f"윗꼬리 상한 하향 ({curr_wick:.2f}->{new_wick:.2f}, FAKEOUT_WICK 손실비중 {loss_fake_rate * 100:.0f}%)"
             )
-    elif wick_near_misses >= 4 and loss_fake_rate < 0.15 and curr_wick < 0.40:
-        new_wick = _clamp(curr_wick + 0.02, 0.28, 0.42)
+    elif wick_near_misses >= 4 and loss_fake_rate < 0.15 and curr_wick < settings.max_upper_wick_ratio:
+        new_wick = _clamp(curr_wick + 0.02, 0.30, 0.50)
         if new_wick != curr_wick:
             params["max_upper_wick_ratio"] = new_wick
             adjustments.append(
                 f"윗꼬리 상한 복원 ({curr_wick:.2f}->{new_wick:.2f}, TOP20 근접탈락 {wick_near_misses}건)"
             )
 
-    # 2. RESISTANCE_REJECT 비율 검사 -> min_projected_rr 보정 [3.0, 3.6]
-    curr_rr = float(params.get("min_projected_rr", 3.0))
+    # 2. RESISTANCE_REJECT 비율 검사 -> min_projected_rr 보정 [min_projected_rr, 3.2]
+    curr_rr = float(params.get("min_projected_rr", settings.min_projected_rr))
     res_reject_cnt = sum(1 for s in losses if "RESISTANCE_REJECT" in (s.get("error_tags") or []))
     res_reject_rate = (res_reject_cnt / len(losses)) if losses else 0.0
     if res_reject_cnt >= 3 and res_reject_rate >= 0.35:
-        new_rr = _clamp(curr_rr + 0.1, 3.0, 3.6)
+        new_rr = _clamp(curr_rr + 0.1, settings.min_projected_rr, 3.2)
         if new_rr != curr_rr:
             params["min_projected_rr"] = new_rr
             adjustments.append(
                 f"최소 손익비 상향 (1:{curr_rr:.1f}->1:{new_rr:.1f}, 매물대저항 손실 {res_reject_rate * 100:.0f}%)"
             )
-    elif len(effective_completed) >= 15 and res_reject_rate < 0.10 and curr_rr > 3.0:
-        new_rr = _clamp(curr_rr - 0.1, 3.0, 3.6)
+    elif len(effective_completed) >= 15 and res_reject_rate < 0.10 and curr_rr > settings.min_projected_rr:
+        new_rr = _clamp(curr_rr - 0.1, settings.min_projected_rr, 3.2)
         if new_rr != curr_rr:
             params["min_projected_rr"] = new_rr
             adjustments.append(f"최소 손익비 정상화 (1:{curr_rr:.1f}->1:{new_rr:.1f})")
@@ -124,11 +124,11 @@ def _adjust_weak_regime(
         else 0.0
     )
 
-    curr_weak_rr = float(params.get("weak_regime_min_rr", 3.5))
+    curr_weak_rr = float(params.get("weak_regime_min_rr", settings.weak_regime_min_rr))
     curr_weak_mult = float(params.get("weak_regime_risk_mult", 1.0))
 
     if weak_3r_rate < 15.0 or index_drag_rate >= 0.40:
-        new_rr = _clamp(curr_weak_rr + 0.2, 3.0, 4.2)
+        new_rr = _clamp(curr_weak_rr + 0.2, settings.min_projected_rr, 3.6)
         new_mult = _clamp(curr_weak_mult - 0.05, 0.75, 1.0)
         if new_rr != curr_weak_rr or new_mult != curr_weak_mult:
             params["weak_regime_min_rr"] = new_rr
@@ -136,8 +136,8 @@ def _adjust_weak_regime(
             adjustments.append(
                 f"약세장 방어 강화 (R:R 1:{new_rr:.1f}, 리스크상한 {new_mult:.2f}x | WEAK 3R {weak_3r_rate:.0f}%)"
             )
-    elif weak_3r_rate >= 30.0 and (curr_weak_rr > 3.5 or curr_weak_mult < 1.0):
-        new_rr = _clamp(curr_weak_rr - 0.1, 3.5, 4.2)
+    elif weak_3r_rate >= 30.0 and (curr_weak_rr > settings.weak_regime_min_rr or curr_weak_mult < 1.0):
+        new_rr = _clamp(curr_weak_rr - 0.1, settings.weak_regime_min_rr, 3.6)
         new_mult = _clamp(curr_weak_mult + 0.05, 0.75, 1.0)
         params["weak_regime_min_rr"] = new_rr
         params["weak_regime_risk_mult"] = new_mult
@@ -204,7 +204,7 @@ def _adjust_tracks_and_a_dry(
     params["track_weights"] = weights
     params["disabled_tracks"] = disabled
 
-    # TOP20 근접 탈락 역산 -> Track A 거래량 고갈 한계 보정 [0.55, 0.65]
+    # TOP20 근접 탈락 역산 -> Track A 거래량 고갈 한계 보정 [0.65, 0.85]
     dry_misses = sum(
         1
         for d in recent_top20
@@ -217,17 +217,19 @@ def _adjust_tracks_and_a_dry(
         if tr_a_comp
         else 0.0
     )
-    curr_dry = float(params.get("track_a_dry_vol_ratio_max", 0.60))
+    curr_dry = float(params.get("track_a_dry_vol_ratio_max", settings.track_a_dry_vol_ratio_max))
     if dry_misses >= 5 and (not tr_a_comp or tr_a_3r >= 30.0):
-        new_dry = _clamp(curr_dry + 0.02, 0.55, 0.65)
+        new_dry = _clamp(curr_dry + 0.02, 0.65, 0.85)
         if new_dry != curr_dry:
             params["track_a_dry_vol_ratio_max"] = new_dry
             adjustments.append(
                 f"Track A 거래량 고갈 완화 ({curr_dry * 100:.0f}%->{new_dry * 100:.0f}%, TOP20 병목 {dry_misses}건)"
             )
-    elif tr_a_comp and len(tr_a_comp) >= 6 and tr_a_3r < 20.0 and curr_dry > 0.60:
-        params["track_a_dry_vol_ratio_max"] = 0.60
-        adjustments.append(f"Track A 거래량 고갈 기본 복원 (60%, Track A 3R {tr_a_3r:.0f}%)")
+    elif tr_a_comp and len(tr_a_comp) >= 6 and tr_a_3r < 20.0 and curr_dry > settings.track_a_dry_vol_ratio_max:
+        params["track_a_dry_vol_ratio_max"] = settings.track_a_dry_vol_ratio_max
+        adjustments.append(
+            f"Track A 거래량 고갈 기본 복원 ({settings.track_a_dry_vol_ratio_max * 100:.0f}%, Track A 3R {tr_a_3r:.0f}%)"
+        )
 
 
 def _update_track_d_promotions(

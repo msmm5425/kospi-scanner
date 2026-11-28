@@ -224,9 +224,9 @@ def format_weekly_report_message(report: dict[str, Any]) -> str:
     if ap:
         lines.append(
             f"▪ 자동 보정 파라미터 ({lp.get('learning_days', 0)}일차): "
-            f"윗꼬리<={ap.get('max_upper_wick_ratio', 0.40):.2f} | "
-            f"최소R:R 1:{ap.get('min_projected_rr', 3.0):.1f} | "
-            f"약세R:R 1:{ap.get('weak_regime_min_rr', 3.5):.1f}"
+            f"윗꼬리<={ap.get('max_upper_wick_ratio', settings.max_upper_wick_ratio):.2f} | "
+            f"최소R:R 1:{ap.get('min_projected_rr', settings.min_projected_rr):.1f} | "
+            f"약세R:R 1:{ap.get('weak_regime_min_rr', settings.weak_regime_min_rr):.1f}"
         )
     if promo_d:
         lines.append(f"▪ 실전 투입 중 Track D: {', '.join(promo_d)}")
@@ -303,7 +303,7 @@ def format_scan_diagnostic_summary(scan_result: dict[str, Any]) -> str:
         f"▪ 유니버스 {st.get('universe_count', 0)}종목 → 사전제외 {st.get('pre_filtered_out', 0)} / "
         f"안전제외 {st.get('safety_rejected', 0)} / 관문탈락 {st.get('gate_rejected', 0)} / "
         f"전략탈락 {st.get('strategy_rejected', 0)} / R:R탈락 {st.get('rr_rejected', 0)}",
-        f"▪ 최종 1:3 매수픽 통과: {len(sigs)}건",
+        f"▪ 최종 스윙 매수픽 통과: {len(sigs)}건",
     ]
 
     if sigs:
@@ -319,7 +319,9 @@ def format_scan_diagnostic_summary(scan_result: dict[str, Any]) -> str:
             )
     else:
         lines.append("")
-        lines.append("⏸️ 현재 차트 기준 Track A/B/C/D + 1:3 손익비를 모두 통과한 매수픽이 0건입니다.")
+        lines.append(
+            f"⏸️ 현재 차트 기준 Track A/B/C/D + 손익비(1:{settings.min_projected_rr:.1f}+) 조건을 모두 통과한 매수픽이 0건입니다."
+        )
 
     if rr_rej:
         lines.append("")

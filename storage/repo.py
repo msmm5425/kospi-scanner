@@ -16,6 +16,7 @@ from config.settings import (
     PATTERN_QUEUE_FILE,
     SIGNALS_LOG_FILE,
     TOP20_HISTORY_FILE,
+    settings,
 )
 
 
@@ -46,10 +47,10 @@ def _default_learning_profile() -> dict[str, Any]:
             "effective_winners": 0,
         },
         "adaptive_params": {
-            "max_upper_wick_ratio": 0.40,
-            "max_disparity_20_pct": 118.0,
-            "min_projected_rr": 3.0,
-            "weak_regime_min_rr": 3.5,
+            "max_upper_wick_ratio": settings.max_upper_wick_ratio,
+            "max_disparity_20_pct": settings.max_disparity_20_pct,
+            "min_projected_rr": settings.min_projected_rr,
+            "weak_regime_min_rr": settings.weak_regime_min_rr,
             "weak_regime_risk_mult": 1.0,
             "track_risk_mult": {
                 "TRACK_A_VCP": 1.0,
@@ -57,7 +58,7 @@ def _default_learning_profile() -> dict[str, Any]:
                 "TRACK_C_TURNAROUND": 1.0,
                 "TRACK_D": 1.0,
             },
-            "track_a_dry_vol_ratio_max": 0.60,
+            "track_a_dry_vol_ratio_max": settings.track_a_dry_vol_ratio_max,
             "track_weights": {
                 "TRACK_A_VCP": 1.0,
                 "TRACK_B_PULLBACK": 1.0,

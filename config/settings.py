@@ -109,45 +109,46 @@ class Settings:
         "우B", "우C", "우(", "우선주", "선물", "채권", "합성", "TR",
     )
 
-    # 공통 관문 임계값
-    min_chg_pct: float = 1.5
-    max_chg_pct: float = 10.0
-    max_upper_wick_ratio: float = 0.40
-    max_disparity_20_pct: float = 118.0
+    # 공통 관문 임계값 (퀀트 실전 균형 완화)
+    min_chg_pct: float = 1.0
+    max_chg_pct: float = 12.5
+    max_upper_wick_ratio: float = 0.46
+    max_disparity_20_pct: float = 120.0
     weak_regime_index_drop_pct: float = -1.5
     index_bars: int = 100
     ohlcv_bars: int = 150
     supply_days: int = 5
 
     # Track A (VCP 타이트 돌파)
-    track_a_vcp_ratio_max: float = 0.70
-    track_a_dry_vol_ratio_max: float = 0.60
-    track_a_breakout_vol_ratio_min: float = 1.80
-    track_a_pivot_proximity_min: float = 0.985
+    track_a_vcp_ratio_max: float = 0.85
+    track_a_dry_vol_ratio_max: float = 0.75
+    track_a_breakout_vol_ratio_min: float = 1.30
+    track_a_pivot_proximity_min: float = 0.960
     track_a_atr_mult: float = 1.5
-    track_a_max_risk_pct: float = 5.5
+    track_a_max_risk_pct: float = 6.5
 
     # Track B (기준봉 눌림목 재점화)
-    track_b_anchor_min_chg_pct: float = 9.5
-    track_b_anchor_min_vol_ratio: float = 2.50
+    track_b_anchor_min_chg_pct: float = 7.5
+    track_b_anchor_min_vol_ratio: float = 1.80
     track_b_lookback_min_days: int = 4
-    track_b_lookback_max_days: int = 15
-    track_b_adj_max_vol_vs_anchor: float = 0.45
-    track_b_reignite_min_vol_vs_prev: float = 1.50
-    track_b_max_risk_pct: float = 5.0
+    track_b_lookback_max_days: int = 20
+    track_b_adj_max_vol_vs_anchor: float = 0.55
+    track_b_reignite_min_vol_vs_prev: float = 1.15
+    track_b_max_risk_pct: float = 6.5
 
     # Track C (바닥권 수급 매집 전환)
-    track_c_max_ratio_to_120h: float = 0.85
-    track_c_box_20d_range_max: float = 0.25
-    track_c_supply_pos_days_min: int = 3
-    track_c_breakout_vol_ratio_min: float = 1.80
-    track_c_max_risk_pct: float = 6.5
+    track_c_max_ratio_to_120h: float = 0.90
+    track_c_box_20d_range_max: float = 0.30
+    track_c_supply_pos_days_min: int = 2
+    track_c_breakout_vol_ratio_min: float = 1.30
+    track_c_max_risk_pct: float = 7.5
 
-    # 1:3 R:R 기하학 기준
-    min_clear_upside_pct: float = 10.0
-    min_projected_rr: float = 3.0
+    # 손익비(R:R) 기하학 기준
+    min_clear_upside_pct: float = 8.0
+    min_projected_rr: float = 2.3
+    weak_regime_min_rr: float = 2.6
     blue_sky_upside_pct: float = 30.0
-    heavy_vol_resistance_mult: float = 2.0
+    heavy_vol_resistance_mult: float = 2.3
     resistance_lookback_days: int = 120
 
     # 쿨다운 · 오답노트 · 분석 · 연속 스캔 스케줄 (08:00~21:00)
