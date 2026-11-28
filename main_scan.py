@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="KOSPI 1:3 스윙 스캐너 08:00~21:00 스캔 실행")
     parser.add_argument("--provider", choices=["pykrx", "kis", "kb"], default=None)
     parser.add_argument("--date", default=None, help="기준 날짜 YYYY-MM-DD (과거 시뮬레이션용)")
+    parser.add_argument("--latest-trading-day", action="store_true", help="휴장일에도 직전 유효 거래일 차트 기준으로 스캔")
     parser.add_argument("--dry-run", action="store_true", help="저장/실제 텔레그램 발송 없이 시뮬레이션")
     parser.add_argument("--no-notify", action="store_true", help="텔레그램 발송 생략")
     parser.add_argument("--force", action="store_true", help="휴장일/비개장일 가드 무시 강제 실행")
@@ -39,18 +40,25 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _configure_logging(args.verbose)
-    provider = create_provider(provider_name=args.provider, as_of_date=args.date)
+    target_date = args.date
+    provider = create_provider(provider_name=args.provider, as_of_date=target_date)
     notifier = TelegramNotifier(dry_run=args.dry_run or settings.dry_run)
 
     today_kst = datetime.now(tz=KST).strftime("%Y-%m-%d")
-    if args.date is None and not args.force:
+    if target_date is None and args.latest_trading_day:
+        idx_df = provider.get_index_ohlcv(bars=10)
+        if not idx_df.empty:
+            target_date = str(idx_df["date"].iloc[-1])
+            provider.as_of_date = target_date
+
+    if target_date is None and not args.force:
         if not provider.is_trading_day(today_kst):
             print(f"[SCAN 스킵] {today_kst}은(는) KRX 휴장일/비개장일입니다.")
             return 0
 
     scan_now_kst = (
-        datetime.strptime(args.date[:10], "%Y-%m-%d").replace(hour=15, minute=35, tzinfo=KST)
-        if args.date
+        datetime.strptime(target_date[:10], "%Y-%m-%d").replace(hour=15, minute=35, tzinfo=KST)
+        if target_date
         else None
     )
 
@@ -69,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.loop and args.date is None:
+    if args.loop and target_date is None:
         loop_res = run_loop_mode(
             provider=provider,
             notifier=notifier,

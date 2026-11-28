@@ -24,6 +24,7 @@ def _write_github_output(values: dict[str, str]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="KIS 접근토큰 1일 1회 사전 확보 및 캐시 메타 출력")
     parser.add_argument("--min-ttl-hours", type=float, default=4.5, help="남은 유효시간 최소 기준(시간)")
+    parser.add_argument("--skip-weekends", action="store_true", help="주말(토·일)에는 신규 토큰 발급 스킵")
     parser.add_argument("--github-output", action="store_true", help="GITHUB_OUTPUT에 캐시 저장 여부 기록")
     args = parser.parse_args(argv)
 
@@ -35,11 +36,17 @@ def main(argv: list[str] | None = None) -> int:
             _write_github_output({"needs_save": "false", "cache_key": ""})
         return 0
 
+    now_kst = datetime.now(tz=KST)
+    if args.skip_weekends and now_kst.weekday() >= 5:
+        print(f"[KIS TOKEN] 주말({now_kst.strftime('%Y-%m-%d')}) — 토큰 발급 스킵")
+        if args.github_output:
+            _write_github_output({"needs_save": "false", "cache_key": ""})
+        return 0
+
     provider = KISProvider()
     min_ttl_sec = max(120.0, float(args.min_ttl_hours) * 3600.0)
     res = provider.ensure_daily_token(min_ttl_sec=min_ttl_sec, retry_delay_sec=62.0)
 
-    now_kst = datetime.now(tz=KST)
     cache_key = f"kis-token-v1-{now_kst.strftime('%Y%m%d')}-{int(time.time())}"
     source = res["source"]
     rem_h = round(res["remaining_sec"] / 3600.0, 2)

@@ -11,26 +11,19 @@ on:
     - cron: "37 7 * * 1-5"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Dry run without saving state or sending Telegram alerts"
-        required: false
-        default: "false"
-      single_scan:
-        description: "Run single scan instead of loop mode"
-        required: false
-        default: "false"
+      mode:
+        description: "실행 모드 (chart_check_summary: 1회 차트 매수픽 점검+텔레그램 / single_live: 1회 실전 / loop_live: 연속 루프)"
+        type: choice
+        required: true
+        default: "chart_check_summary"
+        options:
+          - chart_check_summary
+          - single_live
+          - loop_live
       target_date:
-        description: "Optional chart date YYYY-MM-DD (e.g. 2026-11-27 for weekend test)"
+        description: "기준 거래일 YYYY-MM-DD (비워두면 점검 모드에서 최근 거래일 자동 선택)"
         required: false
         default: ""
-      force:
-        description: "Bypass holiday/weekend guard"
-        required: false
-        default: "false"
-      notify_summary:
-        description: "Send diagnostic scan summary (picks & near-misses) to Telegram"
-        required: false
-        default: "false"
 
 permissions:
   contents: write
@@ -68,10 +61,10 @@ jobs:
           KIS_API_BASE_URL: ${{ vars.KIS_API_BASE_URL || 'https://openapi.koreainvestment.com:9443' }}
           KIS_TOKEN_CACHE_PATH: ${{ runner.temp }}/kospi_token_cache/kis_token.json
         run: |
-          if [ "${{ github.event.inputs.single_scan }}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.mode }}" != "loop_live" ]; then
             python main_token.py --min-ttl-hours 0.5 --github-output
           else
-            python main_token.py --min-ttl-hours 13.5 --github-output
+            python main_token.py --min-ttl-hours 13.5 --skip-weekends --github-output
           fi
       - name: Save KIS access token cache
         if: steps.kis_token.outputs.needs_save == 'true' && steps.kis_token.outputs.cache_key != ''
@@ -93,38 +86,30 @@ jobs:
           KOSPI_TELEGRAM_TOKEN: ${{ secrets.KOSPI_TELEGRAM_TOKEN }}
           KOSPI_TELEGRAM_CHAT_ID: ${{ secrets.KOSPI_TELEGRAM_CHAT_ID }}
         run: |
-          if [ "${{ github.event.schedule }}" = "47 22 * * 0-4" ]; then
-            SHIFT_END="12:22"
-          elif [ "${{ github.event.schedule }}" = "13 3 * * 1-5" ]; then
-            SHIFT_END="16:47"
-          else
-            SHIFT_END="21:05"
-          fi
-          if [ "${{ github.event.inputs.single_scan }}" = "true" ]; then
-            EXTRA_ARGS=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.mode }}" = "chart_check_summary" ]; then
             if [ -n "${{ github.event.inputs.target_date }}" ]; then
-              EXTRA_ARGS="$EXTRA_ARGS --date ${{ github.event.inputs.target_date }}"
-            fi
-            if [ "${{ github.event.inputs.force }}" = "true" ]; then
-              EXTRA_ARGS="$EXTRA_ARGS --force"
-            fi
-            if [ "${{ github.event.inputs.notify_summary }}" = "true" ]; then
-              EXTRA_ARGS="$EXTRA_ARGS --notify-summary"
-            fi
-            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-              python main_scan.py --dry-run $EXTRA_ARGS
+              python main_scan.py --dry-run --notify-summary --date "${{ github.event.inputs.target_date }}"
             else
-              python main_scan.py $EXTRA_ARGS
+              python main_scan.py --dry-run --notify-summary --latest-trading-day
+            fi
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.mode }}" = "single_live" ]; then
+            if [ -n "${{ github.event.inputs.target_date }}" ]; then
+              python main_scan.py --date "${{ github.event.inputs.target_date }}"
+            else
+              python main_scan.py
             fi
           else
-            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-              python main_scan.py --loop --interval-sec 120 --max-minutes 280 --end-kst "$SHIFT_END" --dry-run
+            if [ "${{ github.event.schedule }}" = "47 22 * * 0-4" ]; then
+              SHIFT_END="12:22"
+            elif [ "${{ github.event.schedule }}" = "13 3 * * 1-5" ]; then
+              SHIFT_END="16:47"
             else
-              python main_scan.py --loop --interval-sec 120 --max-minutes 280 --end-kst "$SHIFT_END" --git-sync
+              SHIFT_END="21:05"
             fi
+            python main_scan.py --loop --interval-sec 120 --max-minutes 280 --end-kst "$SHIFT_END" --git-sync
           fi
       - name: Final state sync commit
-        if: github.event.inputs.dry_run != 'true'
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.mode != 'chart_check_summary'
         run: |
           git add storage/data/signals_log.json storage/data/learning_profile.json
           if ! git diff --cached --quiet; then

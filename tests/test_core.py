@@ -1105,3 +1105,38 @@ def test_naver_supply_and_scan_diagnostic_summary(tmp_path) -> None:
     summary_txt = format_scan_diagnostic_summary(res)
     assert "KOSPI 차트 매수픽 점검" in summary_txt
     assert "근접테스트" in summary_txt
+
+
+def test_main_scan_latest_trading_day_cli(monkeypatch) -> None:
+    import main_scan
+
+    dates = _trading_dates(160, end="2026-11-27")
+    df_a = _make_track_a_vcp_df(dates)
+    sup_good = {"frgn_today": 10_000, "orgn_today": 15_000, "frgn_3d": 40_000, "orgn_3d": 30_000, "total_5d": 90_000, "pos_days_5d": 4, "intraday_pending": False}
+    provider = MockProvider(
+        universe=[{"code": "100010", "name": "주말점검주", "marcap": 600_000_000_000, "trading_val": float(df_a.iloc[-1]["amount"]), "price": float(df_a.iloc[-1]["close"]), "chg_pct": 4.2}],
+        ohlcv_map={"100010": df_a},
+        supply_map={"100010": sup_good},
+        index_df=_make_index_df(dates, weak=False),
+    )
+    provider.is_trading_day = lambda _d=None: False
+    sent_msgs: list[str] = []
+
+    class _FakeNotifier:
+        def __init__(self, dry_run: bool = False):
+            self.dry_run = dry_run
+
+        def send_signal_alert(self, _sig) -> bool:
+            return True
+
+        def send_text(self, text: str) -> bool:
+            sent_msgs.append(text)
+            return True
+
+    monkeypatch.setattr(main_scan, "create_provider", lambda provider_name=None, as_of_date=None: provider)
+    monkeypatch.setattr(main_scan, "TelegramNotifier", _FakeNotifier)
+    rc = main_scan.main(["--dry-run", "--notify-summary", "--latest-trading-day"])
+    assert rc == 0
+    assert provider.as_of_date == "2026-11-27"
+    assert len(sent_msgs) == 1
+    assert "주말점검주" in sent_msgs[0]
