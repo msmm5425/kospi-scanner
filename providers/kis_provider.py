@@ -21,6 +21,7 @@ from .base import MarketDataProvider, is_eligible_common_stock
 from .naver_fallback import (
     fetch_kind_sector_map,
     fetch_naver_index_ohlcv,
+    fetch_naver_investor_supply,
     fetch_naver_kospi_universe,
     fetch_naver_market_universe,
     fetch_naver_top_gainers,
@@ -32,6 +33,21 @@ except ImportError:  # pragma: no cover
     fdr = None
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_num(val: Any, default: float = 0.0) -> float:
+    """문자열·공백·결측값이 섞인 KIS 수치 필드를 안전하게 float로 변환한다."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val) if pd.notna(val) else default
+    txt = str(val).replace(",", "").strip()
+    if not txt or txt in {"-", "N/A", "nan", "NaN", "None"}:
+        return default
+    try:
+        return float(txt)
+    except ValueError:
+        return default
 
 
 def _default_token_cache_file() -> Path:
@@ -152,6 +168,18 @@ class KISProvider(MarketDataProvider):
     @_session.setter
     def _session(self, val: Any) -> None:
         self._override_session = val
+
+    def _reset_thread_session(self) -> None:
+        """Keep-Alive 끊김 등 네트워크 예외 발생 시 스레드 로컬 HTTP 세션을 닫고 초기화한다."""
+        if self._override_session is not None:
+            return
+        sess = getattr(self._local, "session", None)
+        if sess is not None:
+            try:
+                sess.close()
+            except Exception:
+                pass
+            self._local.session = None
 
     def _require_credentials(self) -> None:
         if not self.app_key or not self.app_secret:
@@ -334,22 +362,42 @@ class KISProvider(MarketDataProvider):
         }
         url = f"{self.base_url}{path}"
         refreshed_once = False
-        for attempt in range(5):
+        max_attempts = 6
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
             self._throttle()
-            resp = self._session.get(url, headers=headers, params=params, timeout=12.0)
+            try:
+                resp = self._session.get(url, headers=headers, params=params, timeout=12.0)
+            except requests.RequestException as exc:
+                last_exc = exc
+                self._reset_thread_session()
+                if attempt < max_attempts - 1:
+                    time.sleep(0.45 * (attempt + 1))
+                    continue
+                raise RuntimeError(f"KIS API 네트워크 오류 ({path}, {tr_id}): {exc}") from exc
+
             if resp.status_code == 200:
-                payload = resp.json()
+                try:
+                    payload = resp.json()
+                except ValueError as exc:
+                    last_exc = exc
+                    if attempt < max_attempts - 1:
+                        time.sleep(0.45 * (attempt + 1))
+                        continue
+                    raise RuntimeError(f"KIS API JSON 파싱 실패 ({path}, {tr_id})") from exc
                 if str(payload.get("rt_cd")) == "0":
                     return payload
                 msg_cd = str(payload.get("msg_cd") or "")
-                # 초당 거래건수 초과 재시도 + 동적 간격 완화
-                if msg_cd == "EGW00201" and attempt < 4:
+                # 초당 거래건수 초과 재시도 + 전체 워커 동조 백오프
+                if msg_cd == "EGW00201" and attempt < max_attempts - 1:
+                    backoff = 0.55 * (attempt + 1)
                     with self._lock:
-                        self._min_interval_sec = min(0.25, self._min_interval_sec + 0.03)
-                    time.sleep(0.55 * (attempt + 1))
+                        self._min_interval_sec = min(0.28, self._min_interval_sec + 0.03)
+                        self._last_req_ts = max(self._last_req_ts, time.time() + min(0.6, backoff * 0.4))
+                    time.sleep(backoff)
                     continue
                 # 토큰 만료 코드 재시도 (요청당 최대 1회만 갱신)
-                if msg_cd in {"EGW00123", "EGW00121"} and not refreshed_once and attempt < 4:
+                if msg_cd in {"EGW00123", "EGW00121"} and not refreshed_once and attempt < max_attempts - 1:
                     refreshed_once = True
                     with self._lock:
                         self._token = ""
@@ -359,11 +407,15 @@ class KISProvider(MarketDataProvider):
                 raise RuntimeError(
                     f"KIS API 오류 ({tr_id}): {payload.get('msg_cd')} {payload.get('msg1')}"
                 )
-            if resp.status_code in {429, 500, 502, 503, 504} and attempt < 4:
+            if resp.status_code in {429, 500, 502, 503, 504} and attempt < max_attempts - 1:
+                if resp.status_code == 429:
+                    with self._lock:
+                        self._min_interval_sec = min(0.28, self._min_interval_sec + 0.03)
+                        self._last_req_ts = max(self._last_req_ts, time.time() + 0.35)
                 time.sleep(0.65 * (attempt + 1))
                 continue
             resp.raise_for_status()
-        raise RuntimeError(f"KIS API 요청 실패 ({path}, {tr_id})")
+        raise RuntimeError(f"KIS API 요청 실패 ({path}, {tr_id}): {last_exc or 'max retries exceeded'}")
 
     def get_universe(
         self,
@@ -455,12 +507,12 @@ class KISProvider(MarketDataProvider):
             {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": norm_code},
         )
         out = payload.get("output") or {}
-        price = float(out.get("stck_prpr") or 0)
-        open_p = float(out.get("stck_oprc") or 0)
-        high_p = float(out.get("stck_hgpr") or 0)
-        low_p = float(out.get("stck_lwpr") or 0)
-        chg_pct = float(out.get("prdy_ctrt") or 0)
-        trading_val = float(out.get("acml_tr_pbmn") or 0)
+        price = _safe_num(out.get("stck_prpr"))
+        open_p = _safe_num(out.get("stck_oprc"))
+        high_p = _safe_num(out.get("stck_hgpr"))
+        low_p = _safe_num(out.get("stck_lwpr"))
+        chg_pct = _safe_num(out.get("prdy_ctrt"))
+        trading_val = _safe_num(out.get("acml_tr_pbmn"))
 
         reasons: list[str] = []
         if str(out.get("mang_issu_yn", "N")).upper() == "Y":
@@ -508,6 +560,7 @@ class KISProvider(MarketDataProvider):
 
         all_rows: list[dict[str, Any]] = []
         cursor_end = end_dt
+        prev_oldest = ""
         # KIS inquire-daily-itemchartprice는 1회 최대 100건 반환 -> 분할 역추적
         for _ in range(4):
             cursor_start = cursor_end - timedelta(days=195)
@@ -527,9 +580,17 @@ class KISProvider(MarketDataProvider):
             if not chunk:
                 break
             all_rows.extend(chunk)
-            oldest = min(str(r.get("stck_bsop_date") or "") for r in chunk if r.get("stck_bsop_date"))
-            if not oldest or len(all_rows) >= bars:
+            oldest = min(
+                (
+                    str(r.get("stck_bsop_date") or "").strip()
+                    for r in chunk
+                    if str(r.get("stck_bsop_date") or "").strip()
+                ),
+                default="",
+            )
+            if not oldest or oldest == prev_oldest or len(oldest) != 8 or not oldest.isdigit() or len(all_rows) >= bars:
                 break
+            prev_oldest = oldest
             cursor_end = datetime.strptime(oldest, "%Y%m%d").date() - timedelta(days=1)
 
         cols = ["date", "open", "high", "low", "close", "volume", "amount"]
@@ -538,23 +599,25 @@ class KISProvider(MarketDataProvider):
 
         records = []
         for r in all_rows:
-            dt = str(r.get("stck_bsop_date") or "")
-            if len(dt) != 8:
+            dt = str(r.get("stck_bsop_date") or "").strip()
+            if len(dt) != 8 or not dt.isdigit():
                 continue
-            close_p = float(r.get("stck_clpr") or 0)
+            close_p = _safe_num(r.get("stck_clpr"))
             if close_p <= 0:
                 continue
             records.append(
                 {
                     "date": f"{dt[:4]}-{dt[4:6]}-{dt[6:8]}",
-                    "open": float(r.get("stck_oprc") or close_p),
-                    "high": float(r.get("stck_hgpr") or close_p),
-                    "low": float(r.get("stck_lwpr") or close_p),
+                    "open": _safe_num(r.get("stck_oprc")) or close_p,
+                    "high": _safe_num(r.get("stck_hgpr")) or close_p,
+                    "low": _safe_num(r.get("stck_lwpr")) or close_p,
                     "close": close_p,
-                    "volume": float(r.get("acml_vol") or 0),
-                    "amount": float(r.get("acml_tr_pbmn") or 0),
+                    "volume": _safe_num(r.get("acml_vol")),
+                    "amount": _safe_num(r.get("acml_tr_pbmn")),
                 }
             )
+        if not records:
+            return pd.DataFrame(columns=cols)
         df = pd.DataFrame(records)
         df = df.drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
         return df.tail(bars).reset_index(drop=True)
@@ -566,17 +629,38 @@ class KISProvider(MarketDataProvider):
         end_date: str | None = None,
     ) -> dict[str, Any]:
         norm_code = str(code).zfill(6)
-        payload = self._request_get(
-            "/uapi/domestic-stock/v1/quotations/inquire-investor",
-            "FHKST01010900",
-            {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": norm_code},
-        )
+        try:
+            payload = self._request_get(
+                "/uapi/domestic-stock/v1/quotations/inquire-investor",
+                "FHKST01010900",
+                {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": norm_code},
+            )
+        except Exception as e:
+            logger.warning("KIS %s 수급(FHKST01010900) 조회 실패 — Naver 폴백 시도: %s", norm_code, e)
+            fb = fetch_naver_investor_supply(
+                norm_code,
+                days=days,
+                end_date=end_date or self.as_of_date,
+                session=self._session,
+            )
+            if fb is not None:
+                return fb
+            return {
+                "frgn_today": 0,
+                "orgn_today": 0,
+                "frgn_3d": 0,
+                "orgn_3d": 0,
+                "total_5d": 0,
+                "pos_days_5d": 0,
+                "intraday_pending": True,
+                "orgn_series": [],
+            }
         rows = payload.get("output") or []
         eff_end = (end_date or self.as_of_date or "").replace("-", "")
         filtered = []
         intraday_pending = False
         for r in rows:
-            dt = str(r.get("stck_bsop_date") or "")
+            dt = str(r.get("stck_bsop_date") or "").strip()
             if eff_end and dt > eff_end:
                 continue
             raw_f = str(r.get("frgn_ntby_qty") or "").strip()
@@ -588,8 +672,8 @@ class KISProvider(MarketDataProvider):
             filtered.append(
                 {
                     "date": dt,
-                    "frgn": int(float(raw_f or 0)),
-                    "orgn": int(float(raw_o or 0)),
+                    "frgn": int(round(_safe_num(raw_f))),
+                    "orgn": int(round(_safe_num(raw_o))),
                 }
             )
         filtered.sort(key=lambda x: x["date"])
@@ -651,8 +735,15 @@ class KISProvider(MarketDataProvider):
                 if not chunk:
                     break
                 all_rows.extend(chunk)
-                oldest = min(str(r.get("stck_bsop_date") or "") for r in chunk if r.get("stck_bsop_date"))
-                if not oldest or oldest == prev_oldest or len(all_rows) >= (bars + 5):
+                oldest = min(
+                    (
+                        str(r.get("stck_bsop_date") or "").strip()
+                        for r in chunk
+                        if str(r.get("stck_bsop_date") or "").strip()
+                    ),
+                    default="",
+                )
+                if not oldest or oldest == prev_oldest or len(oldest) != 8 or not oldest.isdigit() or len(all_rows) >= (bars + 5):
                     break
                 prev_oldest = oldest
                 cursor_end = datetime.strptime(oldest, "%Y%m%d").date() - timedelta(days=1)
@@ -661,9 +752,9 @@ class KISProvider(MarketDataProvider):
 
         records = []
         for r in all_rows:
-            dt = str(r.get("stck_bsop_date") or "")
-            cl = float(r.get("bstp_nmix_prpr") or 0)
-            if len(dt) != 8 or cl <= 0:
+            dt = str(r.get("stck_bsop_date") or "").strip()
+            cl = _safe_num(r.get("bstp_nmix_prpr"))
+            if len(dt) != 8 or not dt.isdigit() or cl <= 0:
                 continue
             records.append(
                 {
@@ -818,12 +909,12 @@ class KISProvider(MarketDataProvider):
                     {"FID_COND_MRKT_DIV_CODE": mkt_cd, "FID_INPUT_ISCD": norm_code},
                 )
                 out = payload.get("output") or {}
-                price = float(out.get("stck_prpr") or 0)
+                price = _safe_num(out.get("stck_prpr"))
                 if price > 0:
                     return {
                         "price": price,
-                        "chg_pct": float(out.get("prdy_ctrt") or 0),
-                        "trading_val": float(out.get("acml_tr_pbmn") or 0),
+                        "chg_pct": _safe_num(out.get("prdy_ctrt")),
+                        "trading_val": _safe_num(out.get("acml_tr_pbmn")),
                         "market_code": mkt_cd,
                     }
             except Exception as e:

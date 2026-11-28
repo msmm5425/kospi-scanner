@@ -40,6 +40,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _configure_logging(args.verbose)
+    try:
+        return _run_main(args)
+    except Exception:
+        logging.getLogger(__name__).exception("스캔 워크플로 치명적 예외 발생")
+        raise
+
+
+def _run_main(args: argparse.Namespace) -> int:
     target_date = args.date
     provider = create_provider(provider_name=args.provider, as_of_date=target_date)
     notifier = TelegramNotifier(dry_run=args.dry_run or settings.dry_run)

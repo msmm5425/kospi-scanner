@@ -310,12 +310,16 @@ def format_scan_diagnostic_summary(scan_result: dict[str, Any]) -> str:
     )
     mkt_title = "KOSPI·KOSDAQ" if has_kq else "KOSPI"
 
+    err_cnt = int(st.get("inspect_errors", 0) or 0)
+    err_samples = scan_result.get("error_samples") or []
+    err_suffix = f" / 오류 {err_cnt}건" if err_cnt > 0 else ""
+
     lines = [
         f"🔎 [{mkt_title} 차트 매수픽 점검] ({scan_result.get('signal_date', '')} · {scan_result.get('session', '')})",
         f"▪ 프로바이더: {scan_result.get('provider', '')} | 소요: {scan_result.get('elapsed_sec', 0)}s",
         f"▪ 유니버스 {st.get('universe_count', 0)}종목 → 사전제외 {st.get('pre_filtered_out', 0)} / "
         f"안전제외 {st.get('safety_rejected', 0)} / 관문탈락 {st.get('gate_rejected', 0)} / "
-        f"전략탈락 {st.get('strategy_rejected', 0)} / R:R탈락 {st.get('rr_rejected', 0)}",
+        f"전략탈락 {st.get('strategy_rejected', 0)} / R:R탈락 {st.get('rr_rejected', 0)}{err_suffix}",
         f"▪ 최종 스윙 매수픽 통과: {len(sigs)}건",
     ]
 
@@ -357,6 +361,12 @@ def format_scan_diagnostic_summary(scan_result: dict[str, Any]) -> str:
                 f"  - {m_tag}{m['name']}({m['code']}) {int(m['price']):,}원({float(m['chg_pct']):+.1f}%) | "
                 f"{m['track']} {m['passed_count']}/{m['total_checks']} [{rsn}]"
             )
+
+    if err_cnt > 0 and err_samples:
+        lines.append("")
+        lines.append("⚠️ [점검 중 예외 종목]")
+        for sample in err_samples[:5]:
+            lines.append(f"  - {sample}")
 
     return "\n".join(lines)
 

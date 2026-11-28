@@ -1466,3 +1466,125 @@ def test_kosdaq_dual_market_universe_index_and_liquidity_cutoffs(tmp_path) -> No
     summary_txt = format_scan_diagnostic_summary(res)
     assert "KOSPI·KOSDAQ 차트 매수픽 점검" in summary_txt
     assert "[KOSDAQ]" in summary_txt
+
+
+def test_kis_reconnect_empty_date_and_scanner_error_isolation(tmp_path) -> None:
+    """KIS 소켓 끊김 재시도, 빈 stck_bsop_date 방어, 수급 Naver 폴백 및 스캐너 종목 예외 격리를 검증한다."""
+    import time
+    from types import SimpleNamespace
+    import requests as req_lib
+    import providers.kis_provider as kis_mod
+    from notify.telegram_bot import TelegramNotifier, format_scan_diagnostic_summary
+    from providers.kis_provider import KISProvider
+
+    orig_sleep = kis_mod.time.sleep
+    kis_mod.time.sleep = lambda _s: None
+    try:
+        # 1. 스레드 로컬 세션에서 Keep-Alive 끊김(ConnectionError) 발생 시 세션 초기화 후 재시도 성공 확인
+        kis = KISProvider(as_of_date="2026-11-27")
+        kis.app_key = "KEY"
+        kis.app_secret = "SEC"
+        kis._token = "TOK"
+        kis._token_expire_ts = time.time() + 3600.0
+        kis._token_issued_date_kst = "2026-11-27"
+
+        sessions_created: list[Any] = []
+
+        class _FlakySession:
+            def __init__(self, idx: int) -> None:
+                self.idx = idx
+                self.closed = False
+
+            def get(self, url, headers=None, params=None, timeout=12.0):
+                if self.idx == 0:
+                    raise req_lib.ConnectionError("RemoteDisconnected simulated")
+                return SimpleNamespace(status_code=200, json=lambda: {"rt_cd": "0", "output": {"recovered": self.idx}})
+
+            def close(self) -> None:
+                self.closed = True
+
+        orig_session_cls = kis_mod.requests.Session
+
+        def _new_session():
+            s = _FlakySession(len(sessions_created))
+            sessions_created.append(s)
+            return s
+
+        kis_mod.requests.Session = _new_session  # type: ignore[misc,assignment]
+        try:
+            res_net = kis._request_get("/uapi/test", "TR_NET", {})
+        finally:
+            kis_mod.requests.Session = orig_session_cls  # type: ignore[misc]
+        assert res_net["output"]["recovered"] == 1
+        assert len(sessions_created) == 2
+        assert sessions_created[0].closed is True
+
+        # 2. get_daily_ohlcv / get_index_ohlcv가 빈 날짜 또는 0원 행만 받아도 ValueError/KeyError 없이 동작
+        kis_empty = KISProvider(as_of_date="2026-11-27")
+        kis_empty.app_key = "KEY"
+        kis_empty.app_secret = "SEC"
+        kis_empty._request_get = lambda *_a, **_kw: {"rt_cd": "0", "output2": [{"stck_bsop_date": "", "stck_clpr": "0"}]}  # type: ignore[method-assign]
+        empty_df = kis_empty.get_daily_ohlcv("005930", bars=60)
+        assert empty_df.empty
+        assert list(empty_df.columns) == ["date", "open", "high", "low", "close", "volume", "amount"]
+
+        # 3. KIS get_investor_supply 실패 시 Naver integration API 폴백 확인
+        def _raise_kis(*_a, **_kw):
+            raise RuntimeError("KIS supply outage")
+
+        kis_empty._request_get = _raise_kis  # type: ignore[method-assign]
+        kis_empty._session = SimpleNamespace(
+            get=lambda url, headers=None, timeout=8.0: SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "dealTrendInfos": [
+                        {"bizdate": "20261126", "foreignerPureBuyQuant": "+1000", "organPureBuyQuant": "+500"},
+                        {"bizdate": "20261127", "foreignerPureBuyQuant": "+2000", "organPureBuyQuant": "+1500"},
+                    ]
+                },
+            )
+        )
+        sup_fb = kis_empty.get_investor_supply("005930", days=5, end_date="2026-11-27")
+        assert sup_fb["frgn_today"] == 2000
+        assert sup_fb["orgn_today"] == 1500
+        assert sup_fb["total_5d"] == 5000
+
+        # 4. run_scan 병렬 실행 중 1개 종목 예외가 전체 스캔을 중단시키지 않고 inspect_errors에 격리·집계됨
+        dates = _trading_dates(160, end="2026-11-27")
+        good_df = _make_track_a_vcp_df(dates)
+        sup_good = {"frgn_today": 10_000, "orgn_today": 15_000, "frgn_3d": 40_000, "orgn_3d": 30_000, "total_5d": 90_000, "pos_days_5d": 4, "intraday_pending": False}
+        flaky_prov = MockProvider(
+            universe=[
+                {"code": "000001", "name": "에러종목", "market": "KOSPI", "marcap": 500_000_000_000, "trading_val": 20_000_000_000, "price": 10_000, "chg_pct": 4.0},
+                {"code": "000002", "name": "정상종목", "market": "KOSPI", "marcap": 500_000_000_000, "trading_val": float(good_df["amount"].iloc[-1]), "price": float(good_df["close"].iloc[-1]), "chg_pct": 4.5},
+            ],
+            ohlcv_map={"000001": good_df.copy(), "000002": good_df},
+            supply_map={"000001": sup_good, "000002": sup_good},
+            index_df=_make_index_df(dates, weak=False),
+        )
+        flaky_prov.provider_name = "kis"
+        orig_safety = flaky_prov.get_safety_status
+
+        def _flaky_safety(code: str) -> dict[str, Any]:
+            if code == "000001":
+                raise RuntimeError("broken ticker payload")
+            return orig_safety(code)
+
+        flaky_prov.get_safety_status = _flaky_safety  # type: ignore[method-assign]
+        res_scan = run_scan(
+            provider=flaky_prov,
+            storage=StorageRepo(data_dir=tmp_path),
+            notifier=TelegramNotifier(dry_run=True),
+            now_kst=datetime(2026, 11, 27, 15, 35, tzinfo=KST),
+            dry_run=True,
+            send_notifications=False,
+        )
+        assert res_scan["stats"]["inspect_errors"] == 1
+        assert res_scan["stats"]["matched_count"] == 1
+        assert len(res_scan["error_samples"]) == 1
+        assert "에러종목(000001)" in res_scan["error_samples"][0]
+        err_summary = format_scan_diagnostic_summary(res_scan)
+        assert "오류 1건" in err_summary
+        assert "점검 중 예외 종목" in err_summary
+    finally:
+        kis_mod.time.sleep = orig_sleep

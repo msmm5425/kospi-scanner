@@ -217,10 +217,12 @@ def run_scan(
         "rr_rejected": 0,
         "matched_count": 0,
         "new_signals_saved": 0,
+        "inspect_errors": 0,
     }
     captured_signals: list[dict[str, Any]] = []
     rr_rejections: list[dict[str, Any]] = []
     near_misses: list[dict[str, Any]] = []
+    error_samples: list[str] = []
     candidates: list[dict[str, Any]] = []
 
     for item in universe:
@@ -478,12 +480,20 @@ def run_scan(
         )
         return {"outcome": "matched", "signal": sig}
 
+    def _safe_inspect(cand: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _inspect_candidate(cand)
+        except Exception as exc:
+            err_tag = f"{cand.get('name', '?')}({cand.get('code', '?')}): {type(exc).__name__}: {str(exc)[:120]}"
+            logger.warning("종목 점검 중 예외 발생 [%s] -> 스킵: %s", cand.get("code"), exc)
+            return {"outcome": "inspect_error", "error": err_tag}
+
     max_workers = 1 if (len(candidates) <= 1 or provider.provider_name in {"mock", "bootstrap_slice"}) else min(6, len(candidates))
     if max_workers <= 1:
-        results = [_inspect_candidate(c) for c in candidates]
+        results = [_safe_inspect(c) for c in candidates]
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            results = list(pool.map(_inspect_candidate, candidates))
+            results = list(pool.map(_safe_inspect, candidates))
 
     for out in results:
         kind = out["outcome"]
@@ -507,6 +517,10 @@ def run_scan(
                 stats["new_signals_saved"] += 1
                 if send_notifications:
                     bot.send_signal_alert(sig)
+        elif kind == "inspect_error":
+            stats["inspect_errors"] += 1
+            if len(error_samples) < 5 and out.get("error"):
+                error_samples.append(str(out["error"]))
 
     captured_signals.sort(key=lambda s: s["rr_geometry"]["projected_rr"], reverse=True)
     near_misses.sort(
@@ -522,6 +536,7 @@ def run_scan(
         "signals": captured_signals,
         "rr_rejections": rr_rejections,
         "near_misses": near_misses[:10],
+        "error_samples": error_samples,
         "elapsed_sec": round(time.time() - t_start, 2),
     }
 
