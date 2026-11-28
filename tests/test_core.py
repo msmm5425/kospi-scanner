@@ -1028,7 +1028,7 @@ def test_naver_and_kind_fallbacks(monkeypatch) -> None:
             return _FakeResp(404, {})
 
     uni = fetch_naver_kospi_universe(session=_FakeSession())
-    assert len(uni) == 1  # 삼성전자는 >5조 제외, 삼성전자우는 우선주 제외, 삼화전기 통과
+    assert len(uni) == 1  # 삼성전자는 >20조 제외, 삼성전자우는 우선주 제외, 삼화전기 통과
     assert uni[0]["code"] == "009470"
 
     # KIS ranking/fluctuation 실패 시 Naver TOP 20 자동 폴백 확인
@@ -1327,3 +1327,22 @@ def test_quant_relaxed_thresholds_capture_real_breakouts() -> None:
     assert rr_pass["passed"] is True, rr_pass["failed_reasons"]
     rr_fail = evaluate_rr_geometry(df_rr_ind, entry_rr, entry_rr * 0.942, "TRACK_A_VCP")
     assert rr_fail["passed"] is False
+
+    # 5. Track A 계단식 상승 돌파(5일 전 저가 ~9.5% 아래) 시 돌파 봉 저가/1*ATR로 타이트 손절 적용 확인
+    df_stair = _make_track_a_vcp_df(dates)
+    base_st = float(df_stair.loc[len(df_stair) - 6, "close"])
+    for step_idx, k_pos in enumerate(range(len(df_stair) - 5, len(df_stair) - 1), start=1):
+        sc = round_to_tick(base_st * (1.0 + 0.02 * step_idx))
+        so = round_to_tick(sc * 0.996)
+        sh = round_to_tick(sc * 1.003)
+        sl = round_to_tick(so * 0.997)
+        df_stair.loc[k_pos, ["open", "high", "low", "close", "volume", "amount"]] = [so, sh, sl, sc, 35_000.0, sc * 35_000.0]
+    st_prev = float(df_stair.iloc[-2]["close"])
+    st_o = round_to_tick(st_prev * 1.002)
+    st_c = round_to_tick(st_prev * 1.022)
+    st_h = round_to_tick(st_c * 1.004)
+    st_l = round_to_tick(st_o * 0.997)
+    df_stair.loc[df_stair.index[-1], ["open", "high", "low", "close", "volume", "amount"]] = [st_o, st_h, st_l, st_c, 280_000.0, st_c * 280_000.0]
+    st_res = evaluate_track_a(compute_indicators(df_stair), sup_2d)
+    assert st_res["passed"] is True, st_res["failed_reasons"]
+    assert ((st_c - float(st_res["invalidation_raw"])) / st_c * 100.0) <= 6.5

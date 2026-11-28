@@ -426,6 +426,9 @@ class KISProvider(MarketDataProvider):
         )
         out = payload.get("output") or {}
         price = float(out.get("stck_prpr") or 0)
+        open_p = float(out.get("stck_oprc") or 0)
+        high_p = float(out.get("stck_hgpr") or 0)
+        low_p = float(out.get("stck_lwpr") or 0)
         chg_pct = float(out.get("prdy_ctrt") or 0)
         trading_val = float(out.get("acml_tr_pbmn") or 0)
 
@@ -456,6 +459,9 @@ class KISProvider(MarketDataProvider):
             "is_safe": len(reasons) == 0 and price > 0,
             "reject_reason": ", ".join(reasons) if reasons else ("" if price > 0 else "시세 없음"),
             "price": price,
+            "open": open_p,
+            "high": high_p,
+            "low": low_p,
             "chg_pct": chg_pct,
             "trading_val": trading_val,
         }

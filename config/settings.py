@@ -33,19 +33,19 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def get_dynamic_min_trading_val_krw(now_kst: datetime | None = None) -> int:
     """장중 시간대별 탄력 최소 거래대금 하한(원) 반환.
 
-    - 프리장(08:00~09:00): 직전 정규장 마감 유동성 기준 30억 원
-    - 09:00 ~ 10:30: 10억 원
-    - 10:30 ~ 13:00: 20억 원
-    - 13:00 이후 (정규장 후반·애프터장·분석 포함): 30억 원
+    - 프리장(08:00~09:00): 직전 정규장 마감 유동성 기준 15억 원
+    - 09:00 ~ 10:30: 5억 원
+    - 10:30 ~ 13:00: 10억 원
+    - 13:00 이후 (정규장 후반·애프터장·분석 포함): 15억 원
     """
     if now_kst is None:
-        return 3_000_000_000
+        return 1_500_000_000
     t = now_kst.timetz().replace(tzinfo=None)
     if dt_time(9, 0) <= t < dt_time(10, 30):
-        return 1_000_000_000
+        return 500_000_000
     if dt_time(10, 30) <= t < dt_time(13, 0):
-        return 2_000_000_000
-    return 3_000_000_000
+        return 1_000_000_000
+    return 1_500_000_000
 
 
 def classify_market_session(now_kst: datetime | None = None) -> str:
@@ -100,9 +100,9 @@ class Settings:
     dry_run: bool = field(default_factory=lambda: _env_bool("DRY_RUN", False))
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO").strip().upper())
 
-    # 유니버스 필터
+    # 유니버스 필터 (코스피 시총 인플레이션 반영: 500억 ~ 20조)
     min_marcap_krw: int = 50_000_000_000       # 500억 원
-    max_marcap_krw: int = 5_000_000_000_000    # 5조 원
+    max_marcap_krw: int = 20_000_000_000_000   # 20조 원
     top20_min_trading_val_krw: int = 3_000_000_000  # 15:50 분석 최소 거래대금 30억 원
     excluded_name_keywords: tuple[str, ...] = (
         "스팩", "SPAC", "리츠", "REIT", "ETF", "ETN", "인버스", "레버리지",

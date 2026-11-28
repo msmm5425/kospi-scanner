@@ -110,9 +110,17 @@ def evaluate_track_a(
             sup_reasons.append("OBV < OBV_MA5")
         failed.append(" & ".join(sup_reasons))
 
-    # 1R 무효화 기준점: 직전 5일 타이트 베이스 저가 또는 진입가 - 1.5 * ATR(14) 중 더 보수적인 값(낮은 가격)
+    # 1R 무효화 기준점: 직전 5일 베이스 저가 또는 1.5*ATR 기준을 쓰되,
+    # 계단식 연속 상승 돌파로 5일 저점이 허용 리스크 상한을 넘을 때는 돌파 봉 저가/1*ATR로 상향 정렬
     atr_stop = close_today - (settings.track_a_atr_mult * atr14)
-    invalidation_raw = min(base_low_5d, atr_stop)
+    raw_stop = min(base_low_5d, atr_stop)
+    max_risk_floor = close_today * (1.0 - settings.track_a_max_risk_pct / 100.0)
+    if raw_stop < max_risk_floor:
+        today_low = float(row["low"]) if float(row.get("low") or 0) > 0 else raw_stop
+        tight_breakout_stop = min(today_low, close_today - atr14)
+        invalidation_raw = max(raw_stop, tight_breakout_stop)
+    else:
+        invalidation_raw = raw_stop
 
     return {
         "track": "TRACK_A_VCP",

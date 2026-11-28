@@ -87,7 +87,7 @@ def evaluate_rr_geometry(
         vol_base = hist["volume"].rolling(20, min_periods=5).mean().shift(1)
 
     vol_ratio_ok = (vol_base > 0) & (hist["volume"] >= settings.heavy_vol_resistance_mult * vol_base)
-    above_entry = hist["high"] > (entry_tick * 1.005)
+    above_entry = hist["high"] > (entry_tick * 1.025)
     heavy_candidates = hist[vol_ratio_ok & above_entry]
 
     prior_120_high = float(hist["high"].max()) if not hist.empty else 0.0

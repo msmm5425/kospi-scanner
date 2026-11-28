@@ -264,10 +264,21 @@ def run_scan(
         if session_type in {"REGULAR", "AFTERMARKET"}:
             s_tval = float(safety.get("trading_val") or 0.0)
             s_chg = float(safety.get("chg_pct") or 0.0)
+            s_price = float(safety.get("price") or 0.0)
+            s_open = float(safety.get("open") or 0.0)
+            s_high = float(safety.get("high") or 0.0)
+            s_low = float(safety.get("low") or 0.0)
             if s_tval > 0 and s_tval < (eff_min_tval * 0.95):
                 return {"outcome": "gate_rejected"}
             if s_chg != 0.0 and (s_chg < (settings.min_chg_pct - 0.15) or s_chg > (settings.max_chg_pct + 0.15)):
                 return {"outcome": "gate_rejected"}
+            if s_open > 0 and s_price > 0 and s_price <= s_open:
+                return {"outcome": "gate_rejected"}
+            if s_high > s_low > 0 and s_price > 0:
+                max_wick = float(adaptive.get("max_upper_wick_ratio") or settings.max_upper_wick_ratio)
+                s_wick = (s_high - s_price) / (s_high - s_low)
+                if s_wick > (max_wick + 0.03):
+                    return {"outcome": "gate_rejected"}
 
         df_raw = provider.get_daily_ohlcv(code, bars=settings.ohlcv_bars)
         if session_type == "PREMARKET" and not df_raw.empty:
