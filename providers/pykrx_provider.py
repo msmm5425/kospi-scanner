@@ -16,6 +16,7 @@ from .naver_fallback import (
     fetch_kind_sector_map,
     fetch_naver_fchart_ohlcv,
     fetch_naver_index_ohlcv,
+    fetch_naver_investor_supply,
     fetch_naver_kospi_universe,
     fetch_naver_top_gainers,
 )
@@ -541,8 +542,9 @@ class PyKRXProvider(MarketDataProvider):
             "intraday_pending": False,
         }
         if pykrx_stock is None:
-            return default_resp
+            return fetch_naver_investor_supply(norm_code, days=days, end_date=eff_end) or default_resp
 
+        df = pd.DataFrame()
         try:
             df = pykrx_stock.get_market_trading_volume_by_date(
                 start_dt.strftime("%Y%m%d"),
@@ -553,10 +555,9 @@ class PyKRXProvider(MarketDataProvider):
             self._sleep()
         except Exception as e:
             logger.debug("pykrx supply (%s) failed: %s", norm_code, e)
-            return default_resp
 
         if df is None or df.empty:
-            return default_resp
+            return fetch_naver_investor_supply(norm_code, days=days, end_date=eff_end) or default_resp
 
         frgn_col = "외국인합계" if "외국인합계" in df.columns else ("외국인" if "외국인" in df.columns else None)
         orgn_col = "기관합계" if "기관합계" in df.columns else ("기관" if "기관" in df.columns else None)

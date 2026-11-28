@@ -211,6 +211,7 @@ def run_scan(
     }
     captured_signals: list[dict[str, Any]] = []
     rr_rejections: list[dict[str, Any]] = []
+    near_misses: list[dict[str, Any]] = []
 
     for item in universe:
         code = str(item["code"]).zfill(6)
@@ -223,7 +224,7 @@ def run_scan(
         if u_tval > 0 and u_tval < (eff_min_tval * 0.5):
             stats["pre_filtered_out"] += 1
             continue
-        if session_type == "REGULAR" and u_chg != 0.0 and (u_chg < -1.0 or u_chg > (settings.max_chg_pct + 1.0)):
+        if session_type in {"REGULAR", "AFTERMARKET"} and u_chg != 0.0 and (u_chg < -1.0 or u_chg > (settings.max_chg_pct + 1.0)):
             stats["pre_filtered_out"] += 1
             continue
 
@@ -295,7 +296,7 @@ def run_scan(
             continue
 
         supply = provider.get_investor_supply(code, days=settings.supply_days)
-        passed_track, _ = _evaluate_priority_tracks(
+        passed_track, track_diags = _evaluate_priority_tracks(
             df_ind,
             supply,
             adaptive_params=adaptive,
@@ -303,6 +304,27 @@ def run_scan(
         )
         if passed_track is None:
             stats["strategy_rejected"] += 1
+            best_diag = max(
+                track_diags,
+                key=lambda d: (
+                    int(d.get("passed_count", 0)) / max(1, int(d.get("total_checks", 1))),
+                    int(d.get("passed_count", 0)),
+                ),
+                default=None,
+            )
+            if best_diag and int(best_diag.get("passed_count", 0)) >= max(1, int(best_diag.get("total_checks", 1)) - 2):
+                near_misses.append(
+                    {
+                        "code": code,
+                        "name": name,
+                        "price": int(round(entry_price)),
+                        "chg_pct": gate_res["metrics"]["chg_pct"],
+                        "track": best_diag.get("track_label") or best_diag.get("track"),
+                        "passed_count": int(best_diag.get("passed_count", 0)),
+                        "total_checks": int(best_diag.get("total_checks", 1)),
+                        "reasons": best_diag.get("failed_reasons") or [],
+                    }
+                )
             continue
 
         tr_group = "TRACK_D" if passed_track["track"].startswith("TRACK_D") else passed_track["track"]
@@ -404,6 +426,10 @@ def run_scan(
                 bot.send_signal_alert(sig)
 
     captured_signals.sort(key=lambda s: s["rr_geometry"]["projected_rr"], reverse=True)
+    near_misses.sort(
+        key=lambda m: (m["passed_count"] / max(1, m["total_checks"]), m["passed_count"], m["chg_pct"]),
+        reverse=True,
+    )
     return {
         "signal_date": signal_date,
         "session": session_type,
@@ -411,6 +437,7 @@ def run_scan(
         "stats": stats,
         "signals": captured_signals,
         "rr_rejections": rr_rejections,
+        "near_misses": near_misses[:10],
         "elapsed_sec": round(time.time() - t_start, 2),
     }
 

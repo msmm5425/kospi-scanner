@@ -1058,3 +1058,50 @@ def test_naver_and_kind_fallbacks(monkeypatch) -> None:
     </table>"""
     sec_map = parse_kind_sector_html(kind_html)
     assert sec_map == {"005930": "통신 및 방송 장비 제조업"}
+
+
+def test_naver_supply_and_scan_diagnostic_summary(tmp_path) -> None:
+    from notify.telegram_bot import format_scan_diagnostic_summary
+    from providers.naver_fallback import parse_naver_integration_supply
+
+    sup = parse_naver_integration_supply(
+        {
+            "dealTrendInfos": [
+                {"bizdate": "20261127", "foreignerPureBuyQuant": "+1,200", "organPureBuyQuant": "+300"},
+                {"bizdate": "20261126", "foreignerPureBuyQuant": "-100", "organPureBuyQuant": "+400"},
+                {"bizdate": "20261125", "foreignerPureBuyQuant": "+50", "organPureBuyQuant": "-10"},
+            ]
+        },
+        days=5,
+        end_date="2026-11-27",
+    )
+    assert sup is not None
+    assert sup["frgn_today"] == 1200
+    assert sup["frgn_3d"] == 1150
+    assert sup["orgn_3d"] == 690
+    assert sup["pos_days_5d"] == 3
+
+    # 수급만 부족해 근접 탈락한 종목이 near_misses 및 진단 요약에 포함되는지 확인
+    dates = _trading_dates(160, end="2026-11-27")
+    df_a = _make_track_a_vcp_df(dates)
+    sup_bad = {"frgn_today": -5_000, "orgn_today": -2_000, "frgn_3d": -10_000, "orgn_3d": -5_000, "total_5d": -15_000, "pos_days_5d": 0, "intraday_pending": False}
+    provider = MockProvider(
+        universe=[{"code": "100010", "name": "근접테스트", "marcap": 600_000_000_000, "trading_val": float(df_a.iloc[-1]["amount"]), "price": float(df_a.iloc[-1]["close"]), "chg_pct": 4.2}],
+        ohlcv_map={"100010": df_a},
+        supply_map={"100010": sup_bad},
+        index_df=_make_index_df(dates, weak=False),
+    )
+    res = run_scan(
+        provider=provider,
+        storage=StorageRepo(data_dir=tmp_path),
+        now_kst=datetime(2026, 11, 27, 15, 35, tzinfo=KST),
+        dry_run=True,
+        send_notifications=False,
+    )
+    assert len(res["signals"]) == 0
+    assert len(res["near_misses"]) == 1
+    assert res["near_misses"][0]["code"] == "100010"
+
+    summary_txt = format_scan_diagnostic_summary(res)
+    assert "KOSPI 차트 매수픽 점검" in summary_txt
+    assert "근접테스트" in summary_txt

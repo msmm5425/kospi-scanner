@@ -290,6 +290,59 @@ def format_closing_briefing_message(briefing: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_scan_diagnostic_summary(scan_result: dict[str, Any]) -> str:
+    """단일 스캔/차트 점검 테스트 결과(포착 픽 + 병목/근접 탈락) 요약 메시지 생성."""
+    st = scan_result.get("stats") or {}
+    sigs = scan_result.get("signals") or []
+    rr_rej = scan_result.get("rr_rejections") or []
+    near = scan_result.get("near_misses") or []
+
+    lines = [
+        f"🔎 [KOSPI 차트 매수픽 점검] ({scan_result.get('signal_date', '')} · {scan_result.get('session', '')})",
+        f"▪ 프로바이더: {scan_result.get('provider', '')} | 소요: {scan_result.get('elapsed_sec', 0)}s",
+        f"▪ 유니버스 {st.get('universe_count', 0)}종목 → 사전제외 {st.get('pre_filtered_out', 0)} / "
+        f"안전제외 {st.get('safety_rejected', 0)} / 관문탈락 {st.get('gate_rejected', 0)} / "
+        f"전략탈락 {st.get('strategy_rejected', 0)} / R:R탈락 {st.get('rr_rejected', 0)}",
+        f"▪ 최종 1:3 매수픽 통과: {len(sigs)}건",
+    ]
+
+    if sigs:
+        lines.append("")
+        lines.append("✅ [최종 통과 매수픽]")
+        for s in sigs[:8]:
+            rr = s.get("rr_geometry") or {}
+            lines.append(
+                f"  • {s['name']}({s['code']}) | {s.get('track_label') or s.get('track')}\n"
+                f"    기준가 {int(s['entry_price']):,}~{int(s.get('max_entry_price', s['entry_price'])):,}원 | "
+                f"1R -{float(rr.get('risk_pct', 0)):.2f}% | 여력 +{float(rr.get('clear_upside_pct', 0)):.1f}% | "
+                f"R:R 1:{float(rr.get('projected_rr', 0)):.2f}"
+            )
+    else:
+        lines.append("")
+        lines.append("⏸️ 현재 차트 기준 Track A/B/C/D + 1:3 손익비를 모두 통과한 매수픽이 0건입니다.")
+
+    if rr_rej:
+        lines.append("")
+        lines.append("📐 [전략 통과 → R:R 단계 아쉽게 탈락]")
+        for r in rr_rej[:5]:
+            lines.append(
+                f"  - {r['name']}({r['code']}) | {r['track']} | "
+                f"R:R 1:{float(r.get('projected_rr', 0)):.2f} ({r.get('reason', '')})"
+            )
+
+    if near:
+        lines.append("")
+        lines.append("👀 [공통관문 통과 · 전략 조건 근접 TOP 5]")
+        for m in near[:5]:
+            rsn = "; ".join(m.get("reasons") or [])
+            lines.append(
+                f"  - {m['name']}({m['code']}) {int(m['price']):,}원({float(m['chg_pct']):+.1f}%) | "
+                f"{m['track']} {m['passed_count']}/{m['total_checks']} [{rsn}]"
+            )
+
+    return "\n".join(lines)
+
+
 class TelegramNotifier:
     """주식 전용 텔레그램 전송기 (KOSPI_TELEGRAM_TOKEN / CHAT_ID 분리 사용)."""
 

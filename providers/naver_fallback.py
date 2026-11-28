@@ -353,3 +353,64 @@ def fetch_kind_sector_map(session: requests.Session | None = None) -> dict[str, 
     except Exception as e:
         logger.debug("KIND sector map fetch failed: %s", e)
         return {}
+
+
+def parse_naver_integration_supply(
+    payload: dict[str, Any] | None,
+    days: int = 5,
+    end_date: str | None = None,
+) -> dict[str, Any] | None:
+    """Naver integration API의 dealTrendInfos에서 외인·기관 순매수(주)를 추출한다."""
+    rows = (payload or {}).get("dealTrendInfos") or []
+    if not rows:
+        return None
+
+    eff_end = (end_date or "").replace("-", "").strip()
+    parsed: list[dict[str, Any]] = []
+    for r in rows:
+        dt = str(r.get("bizdate") or "").strip()
+        if len(dt) != 8 or not dt.isdigit():
+            continue
+        if eff_end and dt > eff_end:
+            continue
+        frgn = int(round(_parse_num(r.get("foreignerPureBuyQuant"))))
+        orgn = int(round(_parse_num(r.get("organPureBuyQuant"))))
+        parsed.append({"date": dt, "frgn": frgn, "orgn": orgn})
+
+    if not parsed:
+        return None
+
+    parsed.sort(key=lambda x: x["date"])
+    recent = parsed[-max(days, 5) :]
+    w3 = recent[-3:]
+    w5 = recent[-days:]
+    return {
+        "frgn_today": recent[-1]["frgn"],
+        "orgn_today": recent[-1]["orgn"],
+        "frgn_3d": sum(x["frgn"] for x in w3),
+        "orgn_3d": sum(x["orgn"] for x in w3),
+        "total_5d": sum(x["frgn"] + x["orgn"] for x in w5),
+        "pos_days_5d": sum(1 for x in w5 if (x["frgn"] + x["orgn"]) > 0),
+        "intraday_pending": False,
+        "orgn_series": [x["orgn"] for x in w5],
+    }
+
+
+def fetch_naver_investor_supply(
+    code: str,
+    days: int = 5,
+    end_date: str | None = None,
+    session: requests.Session | None = None,
+) -> dict[str, Any] | None:
+    """Naver 모바일 통합 API에서 최근 외인·기관 순매수를 조회한다."""
+    norm_code = str(code).zfill(6)
+    sess = session or requests.Session()
+    url = f"https://m.stock.naver.com/api/stock/{norm_code}/integration"
+    try:
+        resp = sess.get(url, headers=_NAVER_HEADERS, timeout=8.0)
+        if resp.status_code != 200:
+            return None
+        return parse_naver_integration_supply(resp.json(), days=days, end_date=end_date)
+    except Exception as e:
+        logger.debug("Naver integration supply (%s) failed: %s", norm_code, e)
+        return None

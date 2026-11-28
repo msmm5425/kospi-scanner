@@ -19,6 +19,18 @@ on:
         description: "Run single scan instead of loop mode"
         required: false
         default: "false"
+      target_date:
+        description: "Optional chart date YYYY-MM-DD (e.g. 2026-11-27 for weekend test)"
+        required: false
+        default: ""
+      force:
+        description: "Bypass holiday/weekend guard"
+        required: false
+        default: "false"
+      notify_summary:
+        description: "Send diagnostic scan summary (picks & near-misses) to Telegram"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -55,7 +67,12 @@ jobs:
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           KIS_API_BASE_URL: ${{ vars.KIS_API_BASE_URL || 'https://openapi.koreainvestment.com:9443' }}
           KIS_TOKEN_CACHE_PATH: ${{ runner.temp }}/kospi_token_cache/kis_token.json
-        run: python main_token.py --min-ttl-hours 13.5 --github-output
+        run: |
+          if [ "${{ github.event.inputs.single_scan }}" = "true" ]; then
+            python main_token.py --min-ttl-hours 0.5 --github-output
+          else
+            python main_token.py --min-ttl-hours 13.5 --github-output
+          fi
       - name: Save KIS access token cache
         if: steps.kis_token.outputs.needs_save == 'true' && steps.kis_token.outputs.cache_key != ''
         uses: actions/cache/save@v4
@@ -84,10 +101,20 @@ jobs:
             SHIFT_END="21:05"
           fi
           if [ "${{ github.event.inputs.single_scan }}" = "true" ]; then
+            EXTRA_ARGS=""
+            if [ -n "${{ github.event.inputs.target_date }}" ]; then
+              EXTRA_ARGS="$EXTRA_ARGS --date ${{ github.event.inputs.target_date }}"
+            fi
+            if [ "${{ github.event.inputs.force }}" = "true" ]; then
+              EXTRA_ARGS="$EXTRA_ARGS --force"
+            fi
+            if [ "${{ github.event.inputs.notify_summary }}" = "true" ]; then
+              EXTRA_ARGS="$EXTRA_ARGS --notify-summary"
+            fi
             if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-              python main_scan.py --dry-run
+              python main_scan.py --dry-run $EXTRA_ARGS
             else
-              python main_scan.py
+              python main_scan.py $EXTRA_ARGS
             fi
           else
             if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then

@@ -9,7 +9,7 @@ from datetime import datetime
 from config.settings import KST, settings
 from engines.closing_picker import build_and_send_closing_briefing
 from engines.scanner import run_loop_mode, run_scan
-from notify.telegram_bot import TelegramNotifier
+from notify.telegram_bot import TelegramNotifier, format_scan_diagnostic_summary
 from providers.factory import create_provider
 
 
@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end-kst", default="21:05", help="루프 자동 종료 KST 시각 (HH:MM)")
     parser.add_argument("--git-sync", action="store_true", help="루프 중 신규 포착 시 Git 자동 커밋/푸시")
     parser.add_argument("--closing-briefing", action="store_true", help="당일 포착 종목 15:00 종가 매수 재검증 브리핑 실행")
+    parser.add_argument("--notify-summary", action="store_true", help="단일 스캔 진단 요약(0건/근접탈락 포함) 출력 및 텔레그램 전송")
     parser.add_argument("--verbose", action="store_true", help="상세 로그 출력")
     args = parser.parse_args(argv)
 
@@ -47,10 +48,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[SCAN 스킵] {today_kst}은(는) KRX 휴장일/비개장일입니다.")
             return 0
 
+    scan_now_kst = (
+        datetime.strptime(args.date[:10], "%Y-%m-%d").replace(hour=15, minute=35, tzinfo=KST)
+        if args.date
+        else None
+    )
+
     if args.closing_briefing:
         brief = build_and_send_closing_briefing(
             provider=provider,
             notifier=notifier,
+            now_kst=scan_now_kst,
             dry_run=args.dry_run,
             send_notifications=not args.no_notify,
             force=args.force,
@@ -81,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     res = run_scan(
         provider=provider,
         notifier=notifier,
+        now_kst=scan_now_kst,
         dry_run=args.dry_run,
         send_notifications=not args.no_notify,
     )
@@ -99,6 +108,13 @@ def main(argv: list[str] | None = None) -> int:
             f"정규장 {sig['entry_price']:,}~{sig.get('max_entry_price', sig['entry_price']):,}원 | "
             f"1R -{rr['risk_pct']:.2f}% | 여력 +{rr['clear_upside_pct']:.1f}% | R:R 1:{rr['projected_rr']:.2f}"
         )
+
+    if args.notify_summary or args.verbose:
+        summary_msg = format_scan_diagnostic_summary(res)
+        print("\n" + summary_msg)
+        if args.notify_summary and not args.no_notify:
+            summary_bot = TelegramNotifier(dry_run=settings.dry_run)
+            summary_bot.send_text(summary_msg)
     return 0
 
 
