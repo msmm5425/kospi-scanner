@@ -48,18 +48,19 @@ def format_signal_message(signal: dict[str, Any]) -> str:
 
     p4 = signal.get("phase4_sl_tp")
     sess_info = signal.get("session_info") or {}
+    mkt = str(signal.get("market") or snap.get("market") or "KOSPI").upper()
     session_type = str(signal.get("session") or sess_info.get("session") or "REGULAR").upper()
     max_entry_p = int(round(float(rr.get("max_entry_price") or signal.get("max_entry_price") or entry_p)))
 
     if session_type == "PREMARKET":
-        header_badge = f"⏰ [프리장 포착 · 정규장 진입 기준] {name} ({code})"
-        session_line = "장 구분: 프리장(08:00~09:00) · 직전 정규장 일봉 검증"
+        header_badge = f"⏰ [프리장 포착 · {mkt}] {name} ({code})"
+        session_line = f"시장: {mkt} · 프리장(08:00~09:00) 직전 정규장 검증"
     elif session_type == "AFTERMARKET":
-        header_badge = f"🌙 [애프터장 포착 · 익일 정규장 기준] {name} ({code})"
-        session_line = "장 구분: 장후/애프터장(15:30~21:00) · 당일 정규장 종가 검증"
+        header_badge = f"🌙 [애프터장 포착 · {mkt}] {name} ({code})"
+        session_line = f"시장: {mkt} · 장후/애프터장(15:30~21:00) 정규장 종가 검증"
     else:
-        header_badge = f"🚨 [KOSPI 1:3 스윙 포착] {name} ({code})"
-        session_line = f"장세: {regime_badge}"
+        header_badge = f"🚨 [{mkt} 스윙 포착] {name} ({code})"
+        session_line = f"시장: {mkt} | 장세: {regime_badge}"
 
     ext_line = ""
     if session_type in {"PREMARKET", "AFTERMARKET"}:
@@ -120,21 +121,27 @@ def format_top20_analysis_message(
     dt = str(summary.get("date") or "")
     hits = summary.get("hits") or []
     misses = summary.get("misses") or []
+    has_kq = any(str(x.get("market") or "").upper() == "KOSDAQ" for x in [*hits, *misses])
+    mkt_title = "KOSPI·KOSDAQ" if has_kq else "KOSPI"
 
     lines = [
-        f"📊 [KOSPI 15:50 장 마감 오답노트 & TOP 20 역추적] ({dt})",
+        f"📊 [{mkt_title} 15:50 장 마감 오답노트 & TOP 20 역추적] ({dt})",
         f"• 오답노트 갱신: 진행 {error_result.get('updated', 0)}건 / D+10 완료 {error_result.get('completed', 0)}건",
         f"• 상승률 TOP 20 선행 포착률: {summary.get('hit_count', 0)}/{summary.get('top20_count', 0)} "
         f"({summary.get('hit_rate_pct', 0.0):.1f}%)",
     ]
     if hits:
-        hit_str = ", ".join(f"{h['name']}({h['chg_pct']:+.1f}%)" for h in hits[:5])
+        hit_str = ", ".join(
+            f"{'[' + h['market'] + '] ' if has_kq and h.get('market') else ''}{h['name']}({h['chg_pct']:+.1f}%)"
+            for h in hits[:5]
+        )
         lines.append(f"✅ Hit: {hit_str}")
     if misses:
         lines.append("🔍 Miss 병목 역산 TOP 5:")
         for m in misses[:5]:
+            mkt_tag = f"[{m['market']}] " if has_kq and m.get("market") else ""
             tags_txt = f" | 전조: {', '.join(m['feature_tags'])}" if m.get("feature_tags") else ""
-            lines.append(f"  - {m['name']} ({m['chg_pct']:+.1f}%): {m['diagnosis']}{tags_txt}")
+            lines.append(f"  - {mkt_tag}{m['name']} ({m['chg_pct']:+.1f}%): {m['diagnosis']}{tags_txt}")
 
     if learning_result:
         sc = learning_result.get("sample_counts") or {}
@@ -260,8 +267,9 @@ def format_closing_briefing_message(briefing: dict[str, Any]) -> str:
                 if item.get("is_blue_sky") or not item.get("nearest_resistance_price")
                 else f"{item['nearest_resistance_price']:,}원(+{item['closing_upside_pct']:.1f}%)"
             )
+            mkt_badge = f"[{item['market']}] " if item.get("market") == "KOSDAQ" else ""
             lines.append(
-                f"{badge} {idx + 1}순위: {item['name']} ({item['code']}) | {item['track_label']}"
+                f"{badge} {idx + 1}순위: {mkt_badge}{item['name']} ({item['code']}) | {item['track_label']}"
             )
             lines.append(
                 f"  • 15:00 현재가: {item['closing_price']:,}원 ({item['closing_chg_pct']:+.1f}%) | "
@@ -296,9 +304,14 @@ def format_scan_diagnostic_summary(scan_result: dict[str, Any]) -> str:
     sigs = scan_result.get("signals") or []
     rr_rej = scan_result.get("rr_rejections") or []
     near = scan_result.get("near_misses") or []
+    markets = {str(m).upper() for m in (scan_result.get("markets") or [])}
+    has_kq = "KOSDAQ" in markets or any(
+        str(x.get("market") or "").upper() == "KOSDAQ" for x in [*sigs, *rr_rej, *near]
+    )
+    mkt_title = "KOSPI·KOSDAQ" if has_kq else "KOSPI"
 
     lines = [
-        f"🔎 [KOSPI 차트 매수픽 점검] ({scan_result.get('signal_date', '')} · {scan_result.get('session', '')})",
+        f"🔎 [{mkt_title} 차트 매수픽 점검] ({scan_result.get('signal_date', '')} · {scan_result.get('session', '')})",
         f"▪ 프로바이더: {scan_result.get('provider', '')} | 소요: {scan_result.get('elapsed_sec', 0)}s",
         f"▪ 유니버스 {st.get('universe_count', 0)}종목 → 사전제외 {st.get('pre_filtered_out', 0)} / "
         f"안전제외 {st.get('safety_rejected', 0)} / 관문탈락 {st.get('gate_rejected', 0)} / "
@@ -311,8 +324,9 @@ def format_scan_diagnostic_summary(scan_result: dict[str, Any]) -> str:
         lines.append("✅ [최종 통과 매수픽]")
         for s in sigs[:8]:
             rr = s.get("rr_geometry") or {}
+            m_tag = f"[{s.get('market', 'KOSPI')}] " if has_kq else ""
             lines.append(
-                f"  • {s['name']}({s['code']}) | {s.get('track_label') or s.get('track')}\n"
+                f"  • {m_tag}{s['name']}({s['code']}) | {s.get('track_label') or s.get('track')}\n"
                 f"    기준가 {int(s['entry_price']):,}~{int(s.get('max_entry_price', s['entry_price'])):,}원 | "
                 f"1R -{float(rr.get('risk_pct', 0)):.2f}% | 여력 +{float(rr.get('clear_upside_pct', 0)):.1f}% | "
                 f"R:R 1:{float(rr.get('projected_rr', 0)):.2f}"
@@ -327,8 +341,9 @@ def format_scan_diagnostic_summary(scan_result: dict[str, Any]) -> str:
         lines.append("")
         lines.append("📐 [전략 통과 → R:R 단계 아쉽게 탈락]")
         for r in rr_rej[:5]:
+            m_tag = f"[{r.get('market', 'KOSPI')}] " if has_kq else ""
             lines.append(
-                f"  - {r['name']}({r['code']}) | {r['track']} | "
+                f"  - {m_tag}{r['name']}({r['code']}) | {r['track']} | "
                 f"R:R 1:{float(r.get('projected_rr', 0)):.2f} ({r.get('reason', '')})"
             )
 
@@ -337,8 +352,9 @@ def format_scan_diagnostic_summary(scan_result: dict[str, Any]) -> str:
         lines.append("👀 [공통관문 통과 · 전략 조건 근접 TOP 5]")
         for m in near[:5]:
             rsn = "; ".join(m.get("reasons") or [])
+            m_tag = f"[{m.get('market', 'KOSPI')}] " if has_kq else ""
             lines.append(
-                f"  - {m['name']}({m['code']}) {int(m['price']):,}원({float(m['chg_pct']):+.1f}%) | "
+                f"  - {m_tag}{m['name']}({m['code']}) {int(m['price']):,}원({float(m['chg_pct']):+.1f}%) | "
                 f"{m['track']} {m['passed_count']}/{m['total_checks']} [{rsn}]"
             )
 

@@ -35,30 +35,34 @@ def _parse_num(val: Any) -> float:
         return 0.0
 
 
-def fetch_naver_kospi_universe(
+def fetch_naver_market_universe(
+    market: str = "KOSPI",
     min_cap: int | None = None,
     max_cap: int | None = None,
     session: requests.Session | None = None,
 ) -> list[dict[str, Any]]:
-    """Naver 모바일 시가총액 API로 KOSPI 보통주 유니버스를 조회한다 (KRX 차단 시 안전 대체)."""
-    lo_cap = settings.min_marcap_krw if min_cap is None else int(min_cap)
-    hi_cap = settings.max_marcap_krw if max_cap is None else int(max_cap)
+    """Naver 모바일 시가총액 API로 KOSPI/KOSDAQ 보통주 유니버스를 조회한다."""
+    mkt = str(market or "KOSPI").upper()
+    default_lo = settings.kosdaq_min_marcap_krw if mkt == "KOSDAQ" else settings.min_marcap_krw
+    default_hi = settings.kosdaq_max_marcap_krw if mkt == "KOSDAQ" else settings.max_marcap_krw
+    lo_cap = default_lo if min_cap is None else int(min_cap)
+    hi_cap = default_hi if max_cap is None else int(max_cap)
     sess = session or requests.Session()
 
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
     page_size = 100
 
-    for page in range(1, 32):
-        url = f"https://m.stock.naver.com/api/stocks/marketValue/KOSPI?page={page}&pageSize={page_size}"
+    for page in range(1, 40):
+        url = f"https://m.stock.naver.com/api/stocks/marketValue/{mkt}?page={page}&pageSize={page_size}"
         try:
             resp = sess.get(url, headers=_NAVER_HEADERS, timeout=10.0)
             if resp.status_code != 200:
-                logger.warning("Naver marketValue HTTP %s (page=%s)", resp.status_code, page)
+                logger.warning("Naver marketValue/%s HTTP %s (page=%s)", mkt, resp.status_code, page)
                 break
             payload = resp.json() or {}
         except Exception as e:
-            logger.warning("Naver marketValue fetch failed (page=%s): %s", page, e)
+            logger.warning("Naver marketValue/%s fetch failed (page=%s): %s", mkt, page, e)
             break
 
         stocks = payload.get("stocks") or []
@@ -104,6 +108,7 @@ def fetch_naver_kospi_universe(
                 {
                     "code": code,
                     "name": name,
+                    "market": mkt,
                     "marcap": int(marcap),
                     "trading_val": float(tval),
                     "price": float(close_p),
@@ -121,79 +126,97 @@ def fetch_naver_kospi_universe(
     return result
 
 
+def fetch_naver_kospi_universe(
+    min_cap: int | None = None,
+    max_cap: int | None = None,
+    session: requests.Session | None = None,
+) -> list[dict[str, Any]]:
+    """Naver 모바일 시가총액 API로 KOSPI 보통주 유니버스를 조회한다."""
+    return fetch_naver_market_universe(
+        market="KOSPI",
+        min_cap=min_cap,
+        max_cap=max_cap,
+        session=session,
+    )
+
+
 def fetch_naver_top_gainers(
     top_n: int = 20,
     min_trading_val: int | None = None,
     marcap_map: dict[str, int] | None = None,
     session: requests.Session | None = None,
+    market: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Naver 모바일 상승률 상위 API로 KOSPI 보통주 TOP N을 조회한다."""
+    """Naver 모바일 상승률 상위 API로 KOSPI(및 선택 시 KOSDAQ) 보통주 TOP N을 조회한다."""
     min_tval = settings.top20_min_trading_val_krw if min_trading_val is None else int(min_trading_val)
     sess = session or requests.Session()
+    markets = (str(market).upper(),) if market else (("KOSPI", "KOSDAQ") if settings.include_kosdaq else ("KOSPI",))
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    for page in (1, 2):
-        url = f"https://m.stock.naver.com/api/stocks/up/KOSPI?page={page}&pageSize=100"
-        try:
-            resp = sess.get(url, headers=_NAVER_HEADERS, timeout=10.0)
-            if resp.status_code != 200:
-                logger.warning("Naver up/KOSPI HTTP %s (page=%s)", resp.status_code, page)
+    for mkt in markets:
+        for page in (1, 2):
+            url = f"https://m.stock.naver.com/api/stocks/up/{mkt}?page={page}&pageSize=100"
+            try:
+                resp = sess.get(url, headers=_NAVER_HEADERS, timeout=10.0)
+                if resp.status_code != 200:
+                    logger.warning("Naver up/%s HTTP %s (page=%s)", mkt, resp.status_code, page)
+                    break
+                payload = resp.json() or {}
+            except Exception as e:
+                logger.warning("Naver up/%s fetch failed (page=%s): %s", mkt, page, e)
                 break
-            payload = resp.json() or {}
-        except Exception as e:
-            logger.warning("Naver up/KOSPI fetch failed (page=%s): %s", page, e)
-            break
 
-        stocks = payload.get("stocks") or []
-        if not stocks:
-            break
+            stocks = payload.get("stocks") or []
+            if not stocks:
+                break
 
-        for row in stocks:
-            stock_end_type = str(row.get("stockEndType") or "").strip().lower()
-            if stock_end_type and stock_end_type != "stock":
-                continue
-            code = str(row.get("itemCode") or row.get("reutersCode") or "").zfill(6)
-            name = str(row.get("stockName") or "").strip()
-            if code in seen or not is_eligible_common_stock(code, name):
-                continue
+            for row in stocks:
+                stock_end_type = str(row.get("stockEndType") or "").strip().lower()
+                if stock_end_type and stock_end_type != "stock":
+                    continue
+                code = str(row.get("itemCode") or row.get("reutersCode") or "").zfill(6)
+                name = str(row.get("stockName") or "").strip()
+                if code in seen or not is_eligible_common_stock(code, name):
+                    continue
 
-            stop_info = row.get("tradeStopType") or {}
-            stop_name = str(stop_info.get("name") or "").upper()
-            if stop_name and stop_name != "TRADING":
-                continue
+                stop_info = row.get("tradeStopType") or {}
+                stop_name = str(stop_info.get("name") or "").upper()
+                if stop_name and stop_name != "TRADING":
+                    continue
 
-            close_p = _parse_num(row.get("closePriceRaw") or row.get("closePrice"))
-            vol = _parse_num(row.get("accumulatedTradingVolumeRaw") or row.get("accumulatedTradingVolume"))
-            tval = _parse_num(row.get("accumulatedTradingValueRaw"))
-            if tval <= 0:
-                tv_mil = _parse_num(row.get("accumulatedTradingValue"))
-                if tv_mil > 0:
-                    tval = tv_mil * 1_000_000.0
-            if tval <= 0 and close_p > 0 and vol > 0:
-                tval = close_p * vol
+                close_p = _parse_num(row.get("closePriceRaw") or row.get("closePrice"))
+                vol = _parse_num(row.get("accumulatedTradingVolumeRaw") or row.get("accumulatedTradingVolume"))
+                tval = _parse_num(row.get("accumulatedTradingValueRaw"))
+                if tval <= 0:
+                    tv_mil = _parse_num(row.get("accumulatedTradingValue"))
+                    if tv_mil > 0:
+                        tval = tv_mil * 1_000_000.0
+                if tval <= 0 and close_p > 0 and vol > 0:
+                    tval = close_p * vol
 
-            if close_p <= 0 or tval < min_tval:
-                continue
+                if close_p <= 0 or tval < min_tval:
+                    continue
 
-            chg = _parse_num(row.get("fluctuationsRatio"))
-            marcap = int(_parse_num(row.get("marketValueRaw")))
-            if marcap <= 0 and marcap_map:
-                marcap = int(marcap_map.get(code, 0))
+                chg = _parse_num(row.get("fluctuationsRatio"))
+                marcap = int(_parse_num(row.get("marketValueRaw")))
+                if marcap <= 0 and marcap_map:
+                    marcap = int(marcap_map.get(code, 0))
 
-            seen.add(code)
-            out.append(
-                {
-                    "code": code,
-                    "name": name,
-                    "close": float(close_p),
-                    "chg_pct": round(chg, 2),
-                    "trading_val": float(tval),
-                    "marcap": marcap,
-                }
-            )
-        if len(out) >= max(1, int(top_n)):
-            break
+                seen.add(code)
+                out.append(
+                    {
+                        "code": code,
+                        "name": name,
+                        "market": mkt,
+                        "close": float(close_p),
+                        "chg_pct": round(chg, 2),
+                        "trading_val": float(tval),
+                        "marcap": marcap,
+                    }
+                )
+            if len([x for x in out if x.get("market") == mkt]) >= max(1, int(top_n)):
+                break
 
     out.sort(key=lambda x: x["chg_pct"], reverse=True)
     return out[: max(1, int(top_n))]
@@ -292,8 +315,11 @@ def fetch_naver_index_ohlcv(
     bars: int = 100,
     end_date: str | None = None,
     session: requests.Session | None = None,
+    market: str = "KOSPI",
 ) -> pd.DataFrame:
-    """Naver fchart에서 KOSPI 지수 일봉을 조회한다."""
+    """Naver fchart에서 KOSPI 또는 KOSDAQ 지수 일봉을 조회한다."""
+    mkt = str(market or "KOSPI").upper()
+    sym = "KOSDAQ" if mkt == "KOSDAQ" else "KOSPI"
     sess = session or requests.Session()
     count = max(bars + 40, 150)
     if end_date:
@@ -303,7 +329,7 @@ def fetch_naver_index_ohlcv(
             count = max(count, bars + days_diff + 40)
         except ValueError:
             pass
-    url = f"https://fchart.stock.naver.com/sise.nhn?symbol=KOSPI&timeframe=day&count={count}&requestType=0"
+    url = f"https://fchart.stock.naver.com/sise.nhn?symbol={sym}&timeframe=day&count={count}&requestType=0"
     try:
         resp = sess.get(url, headers=_NAVER_HEADERS, timeout=10.0)
         if resp.status_code != 200:
@@ -311,7 +337,7 @@ def fetch_naver_index_ohlcv(
         text = resp.content.decode("euc-kr", errors="replace")
         return parse_naver_fchart_xml(text, bars=bars, end_date=end_date, is_index=True)
     except Exception as e:
-        logger.debug("Naver fchart KOSPI failed: %s", e)
+        logger.debug("Naver fchart %s failed: %s", sym, e)
         return pd.DataFrame(columns=["date", "close", "chg_pct"])
 
 
@@ -341,18 +367,21 @@ def parse_kind_sector_html(html_text: str) -> dict[str, str]:
 
 
 def fetch_kind_sector_map(session: requests.Session | None = None) -> dict[str, str]:
-    """KIND 상장법인목록에서 유가증권시장(KOSPI) 종목별 업종 매핑을 조회한다."""
+    """KIND 상장법인목록에서 KOSPI(및 선택 시 KOSDAQ) 종목별 업종 매핑을 조회한다."""
     sess = session or requests.Session()
-    url = "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=stockMkt"
-    try:
-        resp = sess.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12.0)
-        if resp.status_code != 200 or not resp.content:
-            return {}
-        html_text = resp.content.decode("euc-kr", errors="replace")
-        return parse_kind_sector_html(html_text)
-    except Exception as e:
-        logger.debug("KIND sector map fetch failed: %s", e)
-        return {}
+    market_types = ("stockMkt", "kosdaqMkt") if settings.include_kosdaq else ("stockMkt",)
+    combined: dict[str, str] = {}
+    for m_type in market_types:
+        url = f"https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType={m_type}"
+        try:
+            resp = sess.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12.0)
+            if resp.status_code != 200 or not resp.content:
+                continue
+            html_text = resp.content.decode("euc-kr", errors="replace")
+            combined.update(parse_kind_sector_html(html_text))
+        except Exception as e:
+            logger.debug("KIND sector map (%s) fetch failed: %s", m_type, e)
+    return combined
 
 
 def parse_naver_integration_supply(

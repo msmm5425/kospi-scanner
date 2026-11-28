@@ -22,6 +22,7 @@ from .naver_fallback import (
     fetch_kind_sector_map,
     fetch_naver_index_ohlcv,
     fetch_naver_kospi_universe,
+    fetch_naver_market_universe,
     fetch_naver_top_gainers,
 )
 
@@ -134,6 +135,7 @@ class KISProvider(MarketDataProvider):
         self._legacy_token_cache_file = Path(tempfile.gettempdir()) / "kospi_scanner_kis_token.json"
         self._universe_cache: dict[str, list[dict[str, Any]]] = {}
         self._marcap_map_cache: dict[str, int] = {}
+        self._market_map_cache: dict[str, str] = {}
         self._holiday_cache: dict[str, bool] = {}
         self._sector_map_cache: dict[str, str] | None = None
 
@@ -368,54 +370,82 @@ class KISProvider(MarketDataProvider):
         min_cap: int | None = None,
         max_cap: int | None = None,
     ) -> list[dict[str, Any]]:
-        lo_cap = settings.min_marcap_krw if min_cap is None else int(min_cap)
-        hi_cap = settings.max_marcap_krw if max_cap is None else int(max_cap)
         self._require_credentials()
-
-        cache_key = f"{lo_cap}_{hi_cap}"
+        include_kq = settings.include_kosdaq
+        cache_key = f"{min_cap}_{max_cap}_{int(include_kq)}"
         with self._lock:
             if cache_key in self._universe_cache:
                 return list(self._universe_cache[cache_key])
 
-        result = fetch_naver_kospi_universe(min_cap=lo_cap, max_cap=hi_cap, session=self._session)
+        markets = ("KOSPI", "KOSDAQ") if include_kq else ("KOSPI",)
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
 
-        if not result and fdr is not None:
-            try:
-                listing = fdr.StockListing("KOSPI")
-                if listing is not None and not listing.empty:
-                    for _, row in listing.iterrows():
-                        code = str(row.get("Code") or row.get("Symbol") or "").zfill(6)
-                        name = str(row.get("Name") or "").strip()
-                        if not is_eligible_common_stock(code, name):
-                            continue
-                        marcap = float(pd.to_numeric(row.get("Marcap", 0), errors="coerce") or 0)
-                        if not (lo_cap <= marcap <= hi_cap):
-                            continue
-                        close_p = float(pd.to_numeric(row.get("Close", 0), errors="coerce") or 0)
-                        vol = float(pd.to_numeric(row.get("Volume", 0), errors="coerce") or 0)
-                        tval = float(pd.to_numeric(row.get("Amount", 0), errors="coerce") or 0)
-                        if tval <= 0 and close_p > 0 and vol > 0:
-                            tval = close_p * vol
-                        chg = float(pd.to_numeric(row.get("ChagesRatio", 0), errors="coerce") or 0)
-                        result.append(
-                            {
-                                "code": code,
-                                "name": name,
-                                "marcap": int(marcap),
-                                "trading_val": tval,
-                                "price": close_p,
-                                "chg_pct": chg,
-                            }
-                        )
-                result.sort(key=lambda x: x["trading_val"], reverse=True)
-            except Exception as e:
-                logger.warning("FDR StockListing fallback failed: %s", e)
+        for mkt in markets:
+            lo_cap = (
+                (settings.kosdaq_min_marcap_krw if mkt == "KOSDAQ" else settings.min_marcap_krw)
+                if min_cap is None
+                else int(min_cap)
+            )
+            hi_cap = (
+                (settings.kosdaq_max_marcap_krw if mkt == "KOSDAQ" else settings.max_marcap_krw)
+                if max_cap is None
+                else int(max_cap)
+            )
+            rows = fetch_naver_market_universe(
+                market=mkt,
+                min_cap=lo_cap,
+                max_cap=hi_cap,
+                session=self._session,
+            )
+            if not rows and fdr is not None:
+                try:
+                    listing = fdr.StockListing(mkt)
+                    if listing is not None and not listing.empty:
+                        for _, row in listing.iterrows():
+                            code = str(row.get("Code") or row.get("Symbol") or "").zfill(6)
+                            name = str(row.get("Name") or "").strip()
+                            if not is_eligible_common_stock(code, name):
+                                continue
+                            marcap = float(pd.to_numeric(row.get("Marcap", 0), errors="coerce") or 0)
+                            if not (lo_cap <= marcap <= hi_cap):
+                                continue
+                            close_p = float(pd.to_numeric(row.get("Close", 0), errors="coerce") or 0)
+                            vol = float(pd.to_numeric(row.get("Volume", 0), errors="coerce") or 0)
+                            tval = float(pd.to_numeric(row.get("Amount", 0), errors="coerce") or 0)
+                            if tval <= 0 and close_p > 0 and vol > 0:
+                                tval = close_p * vol
+                            chg = float(pd.to_numeric(row.get("ChagesRatio", 0), errors="coerce") or 0)
+                            rows.append(
+                                {
+                                    "code": code,
+                                    "name": name,
+                                    "market": mkt,
+                                    "marcap": int(marcap),
+                                    "trading_val": tval,
+                                    "price": close_p,
+                                    "chg_pct": chg,
+                                }
+                            )
+                except Exception as e:
+                    logger.warning("FDR StockListing(%s) fallback failed: %s", mkt, e)
 
+            for item in rows:
+                c = str(item["code"]).zfill(6)
+                if c in seen:
+                    continue
+                seen.add(c)
+                item_copy = dict(item)
+                item_copy.setdefault("market", mkt)
+                merged.append(item_copy)
+
+        merged.sort(key=lambda x: x["trading_val"], reverse=True)
         with self._lock:
-            self._universe_cache[cache_key] = result
-            for item in result:
+            self._universe_cache[cache_key] = merged
+            for item in merged:
                 self._marcap_map_cache[item["code"]] = item["marcap"]
-        return result
+                self._market_map_cache[item["code"]] = str(item.get("market") or "KOSPI")
+        return list(merged)
 
     def get_safety_status(self, code: str) -> dict[str, Any]:
         norm_code = str(code).zfill(6)
@@ -592,8 +622,11 @@ class KISProvider(MarketDataProvider):
         self,
         bars: int = 100,
         end_date: str | None = None,
+        market: str = "KOSPI",
     ) -> pd.DataFrame:
         self._require_credentials()
+        mkt = str(market or "KOSPI").upper()
+        index_iscd = "1001" if mkt == "KOSDAQ" else "0001"
         eff_end = (end_date or self.as_of_date or datetime.now(tz=KST).strftime("%Y-%m-%d")).replace("-", "")
         end_dt = datetime.strptime(eff_end, "%Y%m%d").date()
 
@@ -607,7 +640,7 @@ class KISProvider(MarketDataProvider):
                     "FHKUP03500100",
                     {
                         "FID_COND_MRKT_DIV_CODE": "U",
-                        "FID_INPUT_ISCD": "0001",
+                        "FID_INPUT_ISCD": index_iscd,
                         "FID_INPUT_DATE_1": cursor_start.strftime("%Y%m%d"),
                         "FID_INPUT_DATE_2": cursor_end.strftime("%Y%m%d"),
                         "FID_PERIOD_DIV_CODE": "D",
@@ -622,7 +655,7 @@ class KISProvider(MarketDataProvider):
                     break
                 cursor_end = datetime.strptime(oldest, "%Y%m%d").date() - timedelta(days=1)
         except Exception as e:
-            logger.warning("KIS 지수 일봉 조회 실패 — Naver fchart 폴백 시도: %s", e)
+            logger.warning("KIS %s 지수 일봉 조회 실패 — Naver fchart 폴백 시도: %s", mkt, e)
 
         records = []
         for r in all_rows:
@@ -641,6 +674,7 @@ class KISProvider(MarketDataProvider):
                 bars=bars,
                 end_date=end_date or self.as_of_date,
                 session=self._session,
+                market=mkt,
             )
         df = pd.DataFrame(records).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
         df["chg_pct"] = (df["close"].pct_change().fillna(0.0) * 100.0).round(2)
@@ -654,60 +688,73 @@ class KISProvider(MarketDataProvider):
         if end_date or self.as_of_date:
             raise NotImplementedError("KIS 실시간 등락률 랭킹은 과거 날짜 역조회를 지원하지 않습니다. --provider pykrx를 사용하세요.")
 
+        targets = (("0001", "KOSPI"), ("1001", "KOSDAQ")) if settings.include_kosdaq else (("0001", "KOSPI"),)
         out: list[dict[str, Any]] = []
-        try:
-            payload = self._request_get(
-                "/uapi/domestic-stock/v1/ranking/fluctuation",
-                "FHPST01700000",
-                {
-                    "fid_cond_mrkt_div_code": "J",
-                    "fid_cond_scr_div_code": "20170",
-                    "fid_input_iscd": "0001",
-                    "fid_rank_sort_cls_code": "0",
-                    "fid_input_cnt_1": "0",
-                    "fid_prc_cls_code": "1",
-                    "fid_input_price_1": "",
-                    "fid_input_price_2": "",
-                    "fid_vol_cnt": "",
-                    "fid_trgt_cls_code": "0",
-                    "fid_trgt_exls_cls_code": "0000000000",
-                    "fid_div_cls_code": "0",
-                    "fid_rsfl_rate1": "",
-                    "fid_rsfl_rate2": "",
-                },
-            )
-            rows = payload.get("output") or []
-            for r in rows:
-                code = str(r.get("stck_shrn_iscd") or "").zfill(6)
-                name = str(r.get("hts_kor_isnm") or "").strip()
-                if not is_eligible_common_stock(code, name):
-                    continue
-                close_p = float(r.get("stck_prpr") or 0)
-                chg = float(r.get("prdy_ctrt") or 0)
-                vol = float(r.get("acml_vol") or 0)
-                tval = float(r.get("acml_tr_pbmn") or (close_p * vol))
-                if close_p <= 0 or tval < settings.top20_min_trading_val_krw:
-                    continue
-                out.append(
-                    {
-                        "code": code,
-                        "name": name,
-                        "close": close_p,
-                        "chg_pct": round(chg, 2),
-                        "trading_val": tval,
-                        "marcap": self._marcap_map_cache.get(code, 0),
-                    }
-                )
-        except Exception as e:
-            logger.warning("KIS 등락률 랭킹(FHPST01700000) 오류 — Naver TOP 20 폴백 사용: %s", e)
+        seen: set[str] = set()
 
-        if not out:
-            return fetch_naver_top_gainers(
-                top_n=top_n,
-                min_trading_val=settings.top20_min_trading_val_krw,
-                marcap_map=self._marcap_map_cache,
-                session=self._session,
-            )
+        for iscd, mkt in targets:
+            mkt_raw_ok = False
+            try:
+                payload = self._request_get(
+                    "/uapi/domestic-stock/v1/ranking/fluctuation",
+                    "FHPST01700000",
+                    {
+                        "fid_cond_mrkt_div_code": "J",
+                        "fid_cond_scr_div_code": "20170",
+                        "fid_input_iscd": iscd,
+                        "fid_rank_sort_cls_code": "0",
+                        "fid_input_cnt_1": "0",
+                        "fid_prc_cls_code": "1",
+                        "fid_input_price_1": "",
+                        "fid_input_price_2": "",
+                        "fid_vol_cnt": "",
+                        "fid_trgt_cls_code": "0",
+                        "fid_trgt_exls_cls_code": "0000000000",
+                        "fid_div_cls_code": "0",
+                        "fid_rsfl_rate1": "",
+                        "fid_rsfl_rate2": "",
+                    },
+                )
+                rows = payload.get("output") or []
+                if rows:
+                    mkt_raw_ok = True
+                for r in rows:
+                    code = str(r.get("stck_shrn_iscd") or "").zfill(6)
+                    name = str(r.get("hts_kor_isnm") or "").strip()
+                    if code in seen or not is_eligible_common_stock(code, name):
+                        continue
+                    close_p = float(r.get("stck_prpr") or 0)
+                    chg = float(r.get("prdy_ctrt") or 0)
+                    vol = float(r.get("acml_vol") or 0)
+                    tval = float(r.get("acml_tr_pbmn") or (close_p * vol))
+                    if close_p <= 0 or tval < settings.top20_min_trading_val_krw:
+                        continue
+                    seen.add(code)
+                    out.append(
+                        {
+                            "code": code,
+                            "name": name,
+                            "market": self._market_map_cache.get(code, mkt),
+                            "close": close_p,
+                            "chg_pct": round(chg, 2),
+                            "trading_val": tval,
+                            "marcap": self._marcap_map_cache.get(code, 0),
+                        }
+                    )
+            except Exception as e:
+                logger.warning("KIS %s 등락률 랭킹(FHPST01700000) 오류 — Naver 폴백 사용: %s", mkt, e)
+
+            if not mkt_raw_ok:
+                for g in fetch_naver_top_gainers(
+                    top_n=top_n,
+                    min_trading_val=settings.top20_min_trading_val_krw,
+                    marcap_map=self._marcap_map_cache,
+                    session=self._session,
+                    market=mkt,
+                ):
+                    if g["code"] not in seen:
+                        seen.add(g["code"])
+                        out.append(g)
 
         out.sort(key=lambda x: x["chg_pct"], reverse=True)
         return out[: max(1, int(top_n))]

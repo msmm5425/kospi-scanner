@@ -18,6 +18,7 @@ from .naver_fallback import (
     fetch_naver_index_ohlcv,
     fetch_naver_investor_supply,
     fetch_naver_kospi_universe,
+    fetch_naver_market_universe,
     fetch_naver_top_gainers,
 )
 
@@ -184,15 +185,17 @@ class PyKRXProvider(MarketDataProvider):
             d -= timedelta(days=1)
         return d.strftime("%Y-%m-%d")
 
-    def _get_ticker_names(self, date_iso: str) -> dict[str, str]:
+    def _get_ticker_names(self, date_iso: str, market: str = "KOSPI") -> dict[str, str]:
+        mkt = str(market or "KOSPI").upper()
+        cache_key = f"{date_iso}:{mkt}"
         with self._lock:
-            if date_iso in self._ticker_name_cache:
-                return self._ticker_name_cache[date_iso]
+            if cache_key in self._ticker_name_cache:
+                return self._ticker_name_cache[cache_key]
 
         names: dict[str, str] = {}
         if pykrx_stock is not None:
             try:
-                tickers = pykrx_stock.get_market_ticker_list(_to_yyyymmdd(date_iso), market="KOSPI")
+                tickers = pykrx_stock.get_market_ticker_list(_to_yyyymmdd(date_iso), market=mkt)
                 for t in tickers or []:
                     code = str(t).zfill(6)
                     try:
@@ -202,11 +205,11 @@ class PyKRXProvider(MarketDataProvider):
                     except Exception:
                         continue
             except Exception as e:
-                logger.debug("pykrx ticker list failed: %s", e)
+                logger.debug("pykrx %s ticker list failed: %s", mkt, e)
 
         if not names and fdr is not None:
             try:
-                listing = fdr.StockListing("KOSPI")
+                listing = fdr.StockListing(mkt)
                 if listing is not None and not listing.empty:
                     for _, row in listing.iterrows():
                         code = str(row.get("Code") or row.get("Symbol") or "").zfill(6)
@@ -214,152 +217,169 @@ class PyKRXProvider(MarketDataProvider):
                         if len(code) == 6 and nm:
                             names[code] = nm
             except Exception as e:
-                logger.debug("FDR StockListing fallback failed: %s", e)
+                logger.debug("FDR %s StockListing fallback failed: %s", mkt, e)
 
         with self._lock:
-            self._ticker_name_cache[date_iso] = names
+            self._ticker_name_cache[cache_key] = names
         return names
 
     def _get_market_snapshot(self, date_iso: str) -> pd.DataFrame:
-        """해당 거래일 KOSPI 전 종목 시세 + 시가총액 통합 스냅샷을 1회 벌크 조회·캐시."""
+        """해당 거래일 KOSPI(및 선택 시 KOSDAQ) 전 종목 시세 + 시가총액 통합 스냅샷을 조회·캐시."""
+        include_kq = settings.include_kosdaq
+        cache_key = f"{date_iso}:{int(include_kq)}"
         with self._lock:
-            if date_iso in self._snapshot_cache:
-                return self._snapshot_cache[date_iso].copy()
+            if cache_key in self._snapshot_cache:
+                return self._snapshot_cache[cache_key].copy()
 
         ymd = _to_yyyymmdd(date_iso)
-        ohlcv_df = pd.DataFrame()
-        cap_df = pd.DataFrame()
-
-        if pykrx_stock is not None:
-            try:
-                ohlcv_df = pykrx_stock.get_market_ohlcv_by_ticker(ymd, market="KOSPI")
-                self._sleep()
-                cap_df = pykrx_stock.get_market_cap_by_ticker(ymd, market="KOSPI")
-            except Exception as e:
-                logger.warning("pykrx bulk snapshot failed on %s: %s", date_iso, e)
-
+        markets = ("KOSPI", "KOSDAQ") if include_kq else ("KOSPI",)
         rows: list[dict[str, Any]] = []
-        if ohlcv_df is not None and not ohlcv_df.empty:
-            names = self._get_ticker_names(date_iso)
-            for idx, row in ohlcv_df.iterrows():
-                code = str(idx).zfill(6)
-                close_p = float(pd.to_numeric(row.get("종가", row.get("Close", 0)), errors="coerce") or 0)
-                open_p = float(pd.to_numeric(row.get("시가", row.get("Open", 0)), errors="coerce") or 0)
-                high_p = float(pd.to_numeric(row.get("고가", row.get("High", 0)), errors="coerce") or 0)
-                low_p = float(pd.to_numeric(row.get("저가", row.get("Low", 0)), errors="coerce") or 0)
-                vol = float(pd.to_numeric(row.get("거래량", row.get("Volume", 0)), errors="coerce") or 0)
-                amt = float(pd.to_numeric(row.get("거래대금", row.get("Amount", 0)), errors="coerce") or 0)
-                chg = float(pd.to_numeric(row.get("등락률", 0), errors="coerce") or 0)
-                marcap = 0.0
-                if cap_df is not None and not cap_df.empty and idx in cap_df.index:
-                    cap_row = cap_df.loc[idx]
-                    marcap = float(pd.to_numeric(cap_row.get("시가총액", 0), errors="coerce") or 0)
-                if amt <= 0 and close_p > 0 and vol > 0:
-                    amt = close_p * vol
-                rows.append(
-                    {
-                        "code": code,
-                        "name": names.get(code, code),
-                        "open": open_p,
-                        "high": high_p,
-                        "low": low_p,
-                        "close": close_p,
-                        "volume": vol,
-                        "trading_val": amt,
-                        "chg_pct": chg,
-                        "marcap": marcap,
-                    }
-                )
-        elif fdr is not None and not self.as_of_date:
-            # pykrx 장애 시 당일 스냅샷 FDR 폴백
-            try:
-                listing = fdr.StockListing("KOSPI")
-                if listing is not None and not listing.empty:
-                    for _, row in listing.iterrows():
-                        code = str(row.get("Code") or row.get("Symbol") or "").zfill(6)
-                        close_p = float(pd.to_numeric(row.get("Close", 0), errors="coerce") or 0)
-                        open_p = float(pd.to_numeric(row.get("Open", 0), errors="coerce") or 0)
-                        high_p = float(pd.to_numeric(row.get("High", 0), errors="coerce") or 0)
-                        low_p = float(pd.to_numeric(row.get("Low", 0), errors="coerce") or 0)
-                        vol = float(pd.to_numeric(row.get("Volume", 0), errors="coerce") or 0)
-                        amt = float(pd.to_numeric(row.get("Amount", 0), errors="coerce") or 0)
-                        chg = float(pd.to_numeric(row.get("ChagesRatio", 0), errors="coerce") or 0)
-                        marcap = float(pd.to_numeric(row.get("Marcap", 0), errors="coerce") or 0)
-                        if amt <= 0 and close_p > 0 and vol > 0:
-                            amt = close_p * vol
-                        rows.append(
-                            {
-                                "code": code,
-                                "name": str(row.get("Name") or code).strip(),
-                                "open": open_p,
-                                "high": high_p,
-                                "low": low_p,
-                                "close": close_p,
-                                "volume": vol,
-                                "trading_val": amt,
-                                "chg_pct": chg,
-                                "marcap": marcap,
-                            }
-                        )
-            except Exception as e:
-                logger.warning("FDR StockListing fallback failed: %s", e)
+        seen_codes: set[str] = set()
+
+        for mkt in markets:
+            ohlcv_df = pd.DataFrame()
+            cap_df = pd.DataFrame()
+            if pykrx_stock is not None:
+                try:
+                    ohlcv_df = pykrx_stock.get_market_ohlcv_by_ticker(ymd, market=mkt)
+                    self._sleep()
+                    cap_df = pykrx_stock.get_market_cap_by_ticker(ymd, market=mkt)
+                except Exception as e:
+                    logger.warning("pykrx %s bulk snapshot failed on %s: %s", mkt, date_iso, e)
+
+            if ohlcv_df is not None and not ohlcv_df.empty:
+                names = self._get_ticker_names(date_iso, market=mkt)
+                for idx, row in ohlcv_df.iterrows():
+                    code = str(idx).zfill(6)
+                    if code in seen_codes:
+                        continue
+                    seen_codes.add(code)
+                    close_p = float(pd.to_numeric(row.get("종가", row.get("Close", 0)), errors="coerce") or 0)
+                    open_p = float(pd.to_numeric(row.get("시가", row.get("Open", 0)), errors="coerce") or 0)
+                    high_p = float(pd.to_numeric(row.get("고가", row.get("High", 0)), errors="coerce") or 0)
+                    low_p = float(pd.to_numeric(row.get("저가", row.get("Low", 0)), errors="coerce") or 0)
+                    vol = float(pd.to_numeric(row.get("거래량", row.get("Volume", 0)), errors="coerce") or 0)
+                    amt = float(pd.to_numeric(row.get("거래대금", row.get("Amount", 0)), errors="coerce") or 0)
+                    chg = float(pd.to_numeric(row.get("등락률", 0), errors="coerce") or 0)
+                    marcap = 0.0
+                    if cap_df is not None and not cap_df.empty and idx in cap_df.index:
+                        cap_row = cap_df.loc[idx]
+                        marcap = float(pd.to_numeric(cap_row.get("시가총액", 0), errors="coerce") or 0)
+                    if amt <= 0 and close_p > 0 and vol > 0:
+                        amt = close_p * vol
+                    rows.append(
+                        {
+                            "code": code,
+                            "name": names.get(code, code),
+                            "market": mkt,
+                            "open": open_p,
+                            "high": high_p,
+                            "low": low_p,
+                            "close": close_p,
+                            "volume": vol,
+                            "trading_val": amt,
+                            "chg_pct": chg,
+                            "marcap": marcap,
+                        }
+                    )
+            elif fdr is not None and not self.as_of_date:
+                try:
+                    listing = fdr.StockListing(mkt)
+                    if listing is not None and not listing.empty:
+                        for _, row in listing.iterrows():
+                            code = str(row.get("Code") or row.get("Symbol") or "").zfill(6)
+                            if code in seen_codes:
+                                continue
+                            seen_codes.add(code)
+                            close_p = float(pd.to_numeric(row.get("Close", 0), errors="coerce") or 0)
+                            open_p = float(pd.to_numeric(row.get("Open", 0), errors="coerce") or 0)
+                            high_p = float(pd.to_numeric(row.get("High", 0), errors="coerce") or 0)
+                            low_p = float(pd.to_numeric(row.get("Low", 0), errors="coerce") or 0)
+                            vol = float(pd.to_numeric(row.get("Volume", 0), errors="coerce") or 0)
+                            amt = float(pd.to_numeric(row.get("Amount", 0), errors="coerce") or 0)
+                            chg = float(pd.to_numeric(row.get("ChagesRatio", 0), errors="coerce") or 0)
+                            marcap = float(pd.to_numeric(row.get("Marcap", 0), errors="coerce") or 0)
+                            if amt <= 0 and close_p > 0 and vol > 0:
+                                amt = close_p * vol
+                            rows.append(
+                                {
+                                    "code": code,
+                                    "name": str(row.get("Name") or code).strip(),
+                                    "market": mkt,
+                                    "open": open_p,
+                                    "high": high_p,
+                                    "low": low_p,
+                                    "close": close_p,
+                                    "volume": vol,
+                                    "trading_val": amt,
+                                    "chg_pct": chg,
+                                    "marcap": marcap,
+                                }
+                            )
+                except Exception as e:
+                    logger.warning("FDR %s StockListing fallback failed: %s", mkt, e)
 
         if not rows and not self.as_of_date:
             try:
-                naver_items = fetch_naver_kospi_universe(min_cap=0, max_cap=10_000_000_000_000_000)
-                for item in naver_items:
-                    close_p = float(item.get("price") or 0.0)
-                    tval = float(item.get("trading_val") or 0.0)
-                    vol = (tval / close_p) if (close_p > 0 and tval > 0) else 0.0
-                    rows.append(
-                        {
-                            "code": item["code"],
-                            "name": item["name"],
-                            "open": close_p,
-                            "high": close_p,
-                            "low": close_p,
-                            "close": close_p,
-                            "volume": vol,
-                            "trading_val": tval,
-                            "chg_pct": float(item.get("chg_pct") or 0.0),
-                            "marcap": float(item.get("marcap") or 0.0),
-                        }
-                    )
+                for mkt in markets:
+                    for item in fetch_naver_market_universe(market=mkt, min_cap=0, max_cap=10_000_000_000_000_000):
+                        if item["code"] in seen_codes:
+                            continue
+                        seen_codes.add(item["code"])
+                        close_p = float(item.get("price") or 0.0)
+                        tval = float(item.get("trading_val") or 0.0)
+                        vol = (tval / close_p) if (close_p > 0 and tval > 0) else 0.0
+                        rows.append(
+                            {
+                                "code": item["code"],
+                                "name": item["name"],
+                                "market": mkt,
+                                "open": close_p,
+                                "high": close_p,
+                                "low": close_p,
+                                "close": close_p,
+                                "volume": vol,
+                                "trading_val": tval,
+                                "chg_pct": float(item.get("chg_pct") or 0.0),
+                                "marcap": float(item.get("marcap") or 0.0),
+                            }
+                        )
             except Exception as e:
-                logger.warning("Naver KOSPI snapshot fallback failed: %s", e)
+                logger.warning("Naver snapshot fallback failed: %s", e)
 
         snap_df = pd.DataFrame(rows)
         with self._lock:
-            self._snapshot_cache[date_iso] = snap_df
+            self._snapshot_cache[cache_key] = snap_df
         return snap_df.copy()
 
     def _get_krx_risk_codes(self) -> dict[str, str]:
-        """KIND 공개 엔드포인트에서 관리종목/투자주의·경고·위험/정리매매 코드 목록을 조회(1시간 캐시)."""
+        """KIND 공개 엔드포인트에서 KOSPI/KOSDAQ 관리종목/투자주의·경고·위험 코드 목록을 조회(1시간 캐시)."""
         now = time.time()
         with self._lock:
             if self._risk_codes_cache and (now - self._risk_codes_cache[0]) < 3600:
                 return self._risk_codes_cache[1]
 
         risk_map: dict[str, str] = {}
-        endpoints = (
-            ("https://kind.krx.co.kr/investwarn/adminissue.do?method=searchAdminIssueSub&currentPageSize=300&pageIndex=1&searchMode=&marketType=1", "관리종목"),
-            ("https://kind.krx.co.kr/investwarn/investattent.do?method=searchInvestAttentSub&currentPageSize=300&pageIndex=1&marketType=1", "투자주의"),
-            ("https://kind.krx.co.kr/investwarn/investwarning.do?method=searchInvestWarningSub&currentPageSize=300&pageIndex=1&marketType=1", "투자경고"),
-            ("https://kind.krx.co.kr/investwarn/investrisk.do?method=searchInvestRiskSub&currentPageSize=300&pageIndex=1&marketType=1", "투자위험"),
+        mkt_types = ("1", "2") if settings.include_kosdaq else ("1",)
+        templates = (
+            ("https://kind.krx.co.kr/investwarn/adminissue.do?method=searchAdminIssueSub&currentPageSize=300&pageIndex=1&searchMode=&marketType={m}", "관리종목"),
+            ("https://kind.krx.co.kr/investwarn/investattent.do?method=searchInvestAttentSub&currentPageSize=300&pageIndex=1&marketType={m}", "투자주의"),
+            ("https://kind.krx.co.kr/investwarn/investwarning.do?method=searchInvestWarningSub&currentPageSize=300&pageIndex=1&marketType={m}", "투자경고"),
+            ("https://kind.krx.co.kr/investwarn/investrisk.do?method=searchInvestRiskSub&currentPageSize=300&pageIndex=1&marketType={m}", "투자위험"),
         )
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; KOSPI-Swing-Scanner/1.0)",
             "Referer": "https://kind.krx.co.kr/",
         }
-        for url, label in endpoints:
-            try:
-                resp = requests.get(url, headers=headers, timeout=4.0)
-                if resp.status_code == 200 and resp.text:
-                    # KIND 테이블 내 javascript 함수 호출 또는 6자리 종목코드 패턴 추출
-                    for code in re.findall(r"companysummary_open\(['\"](\d{6})['\"]\)", resp.text):
-                        risk_map.setdefault(code, label)
-            except Exception:
-                continue
+        for m in mkt_types:
+            for tmpl, label in templates:
+                try:
+                    resp = requests.get(tmpl.format(m=m), headers=headers, timeout=4.0)
+                    if resp.status_code == 200 and resp.text:
+                        for code in re.findall(r"companysummary_open\(['\"](\d{6})['\"]\)", resp.text):
+                            risk_map.setdefault(code, label)
+                except Exception:
+                    continue
 
         with self._lock:
             self._risk_codes_cache = (now, risk_map)
@@ -370,9 +390,6 @@ class PyKRXProvider(MarketDataProvider):
         min_cap: int | None = None,
         max_cap: int | None = None,
     ) -> list[dict[str, Any]]:
-        lo_cap = settings.min_marcap_krw if min_cap is None else int(min_cap)
-        hi_cap = settings.max_marcap_krw if max_cap is None else int(max_cap)
-
         date_iso = self._effective_end_date()
         snap = self._get_market_snapshot(date_iso)
         if snap.empty:
@@ -382,6 +399,17 @@ class PyKRXProvider(MarketDataProvider):
         for _, row in snap.iterrows():
             code = str(row["code"]).zfill(6)
             name = str(row["name"]).strip()
+            mkt = str(row.get("market") or "KOSPI").upper()
+            lo_cap = (
+                (settings.kosdaq_min_marcap_krw if mkt == "KOSDAQ" else settings.min_marcap_krw)
+                if min_cap is None
+                else int(min_cap)
+            )
+            hi_cap = (
+                (settings.kosdaq_max_marcap_krw if mkt == "KOSDAQ" else settings.max_marcap_krw)
+                if max_cap is None
+                else int(max_cap)
+            )
             if not is_eligible_common_stock(code, name):
                 continue
             marcap = float(row.get("marcap", 0.0))
@@ -393,6 +421,7 @@ class PyKRXProvider(MarketDataProvider):
                 {
                     "code": code,
                     "name": name,
+                    "market": mkt,
                     "marcap": int(marcap),
                     "trading_val": float(row.get("trading_val", 0.0)),
                     "price": float(row.get("close", 0.0)),
@@ -605,10 +634,13 @@ class PyKRXProvider(MarketDataProvider):
         self,
         bars: int = 100,
         end_date: str | None = None,
+        market: str = "KOSPI",
     ) -> pd.DataFrame:
+        mkt = str(market or "KOSPI").upper()
         eff_end = self._effective_end_date(end_date)
+        cache_key = f"{eff_end}:{mkt}"
         with self._lock:
-            cached = self._index_cache.get(eff_end)
+            cached = self._index_cache.get(cache_key)
         if cached is not None and len(cached) >= bars:
             return cached.tail(bars).reset_index(drop=True)
 
@@ -617,29 +649,31 @@ class PyKRXProvider(MarketDataProvider):
         start_dt = end_dt - timedelta(days=cal_days)
 
         cols = ["date", "close", "chg_pct"]
+        pykrx_code = "2001" if mkt == "KOSDAQ" else "1001"
+        fdr_code = "KQ11" if mkt == "KOSDAQ" else "KS11"
         raw = pd.DataFrame()
         if pykrx_stock is not None:
             try:
                 raw = pykrx_stock.get_index_ohlcv_by_date(
                     start_dt.strftime("%Y%m%d"),
                     end_dt.strftime("%Y%m%d"),
-                    "1001",
+                    pykrx_code,
                 )
                 self._sleep()
             except Exception as e:
-                logger.debug("pykrx index failed: %s", e)
+                logger.debug("pykrx %s index failed: %s", mkt, e)
 
         if (raw is None or raw.empty) and fdr is not None:
             try:
-                raw = fdr.DataReader("KS11", start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
+                raw = fdr.DataReader(fdr_code, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
             except Exception as e:
-                logger.debug("FDR KS11 index failed: %s", e)
+                logger.debug("FDR %s index failed: %s", fdr_code, e)
 
         if raw is None or raw.empty:
-            naver_idx = fetch_naver_index_ohlcv(bars=bars, end_date=eff_end)
+            naver_idx = fetch_naver_index_ohlcv(bars=bars, end_date=eff_end, market=mkt)
             if not naver_idx.empty:
                 with self._lock:
-                    self._index_cache[eff_end] = naver_idx
+                    self._index_cache[cache_key] = naver_idx
             return naver_idx
 
         work = raw.reset_index().copy()
@@ -655,7 +689,7 @@ class PyKRXProvider(MarketDataProvider):
         out["chg_pct"] = (out["close"].pct_change().fillna(0.0) * 100.0).round(2)
 
         with self._lock:
-            self._index_cache[eff_end] = out
+            self._index_cache[cache_key] = out
         return out.tail(bars).reset_index(drop=True)
 
     def get_top_gainers(
@@ -678,6 +712,7 @@ class PyKRXProvider(MarketDataProvider):
         for _, r in snap.iterrows():
             code = str(r["code"]).zfill(6)
             name = str(r["name"]).strip()
+            mkt = str(r.get("market") or "KOSPI").upper()
             if not is_eligible_common_stock(code, name):
                 continue
             if code in risk_map:
@@ -696,6 +731,7 @@ class PyKRXProvider(MarketDataProvider):
                 {
                     "code": code,
                     "name": name,
+                    "market": mkt,
                     "close": close_p,
                     "chg_pct": round(chg, 2),
                     "trading_val": tval,
@@ -715,14 +751,22 @@ class PyKRXProvider(MarketDataProvider):
         if fdr is not None:
             try:
                 listing = fdr.StockListing("KRX-DESC")
-                if listing is None or listing.empty:
-                    listing = fdr.StockListing("KOSPI")
                 if listing is not None and not listing.empty:
                     for _, row in listing.iterrows():
                         code = str(row.get("Code") or row.get("Symbol") or "").zfill(6)
                         sec = str(row.get("Sector") or row.get("Industry") or "").strip()
                         if len(code) == 6 and sec and sec != "nan":
                             mapping[code] = sec
+                else:
+                    for mkt in (("KOSPI", "KOSDAQ") if settings.include_kosdaq else ("KOSPI",)):
+                        sub = fdr.StockListing(mkt)
+                        if sub is None or sub.empty:
+                            continue
+                        for _, row in sub.iterrows():
+                            code = str(row.get("Code") or row.get("Symbol") or "").zfill(6)
+                            sec = str(row.get("Sector") or row.get("Industry") or "").strip()
+                            if len(code) == 6 and sec and sec != "nan":
+                                mapping[code] = sec
             except Exception as e:
                 logger.debug("FDR sector map load failed: %s", e)
 

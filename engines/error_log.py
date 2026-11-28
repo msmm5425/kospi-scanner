@@ -5,7 +5,7 @@ from typing import Any
 
 from config.settings import settings
 from indicators.technicals import compute_indicators
-from providers.base import MarketDataProvider
+from providers.base import MarketDataProvider, get_market_index_ohlcv
 from storage.repo import StorageRepo, repo as default_repo
 
 logger = logging.getLogger(__name__)
@@ -89,12 +89,17 @@ def update_error_logs(
     if not active_signals:
         return {"active_checked": 0, "updated": 0, "completed": 0, "details": []}
 
-    index_df = provider.get_index_ohlcv(bars=60, end_date=as_of_date)
+    index_df = get_market_index_ohlcv(provider, bars=60, end_date=as_of_date, market="KOSPI")
+    index_by_market = {"KOSPI": index_df}
+    if any(str(s.get("market") or (s.get("snapshot") or {}).get("market") or "KOSPI").upper() == "KOSDAQ" for s in active_signals):
+        index_by_market["KOSDAQ"] = get_market_index_ohlcv(provider, bars=60, end_date=as_of_date, market="KOSDAQ")
     updated_count = 0
     completed_count = 0
     details: list[dict[str, Any]] = []
 
     for sig in active_signals:
+        sig_mkt = str(sig.get("market") or (sig.get("snapshot") or {}).get("market") or "KOSPI").upper()
+        sig_index_df = index_by_market.get(sig_mkt, index_df)
         code = str(sig.get("code") or "").zfill(6)
         signal_date = str(sig.get("signal_date") or "")
         entry_p = float(sig.get("entry_price") or 0.0)
@@ -137,7 +142,7 @@ def update_error_logs(
         error_tags = list(sig.get("error_tags") or [])
         last_close = float(post_10.iloc[-1]["close"])
         if is_completed and (not hit_10 or not hit_3r) and last_close < entry_p:
-            error_tags = _diagnose_error_tags(sig, post_10, index_df, provider)
+            error_tags = _diagnose_error_tags(sig, post_10, sig_index_df, provider)
 
         updated_sig = dict(sig)
         updated_sig["tracking"] = {

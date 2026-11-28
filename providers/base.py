@@ -98,8 +98,9 @@ class MarketDataProvider(ABC):
         self,
         bars: int = 100,
         end_date: str | None = None,
+        market: str = "KOSPI",
     ) -> pd.DataFrame:
-        """KOSPI 지수(KS11) 일봉 반환.
+        """KOSPI(KS11) 또는 KOSDAQ(KQ11) 지수 일봉 반환.
 
         Returns:
             DataFrame columns: ['date', 'close', 'chg_pct'] ascending by date.
@@ -111,7 +112,7 @@ class MarketDataProvider(ABC):
         top_n: int = 20,
         end_date: str | None = None,
     ) -> list[dict[str, Any]]:
-        """코스피 보통주 상승률 상위 top_n 종목 반환.
+        """보통주 상승률 상위 top_n 종목 반환.
 
         Returns:
             list[dict]: {'code', 'name', 'close', 'chg_pct', 'trading_val', 'marcap'}
@@ -135,3 +136,19 @@ class MarketDataProvider(ABC):
     def get_session_quote(self, code: str, session: str = "REGULAR") -> dict[str, Any] | None:
         """프리장/애프터장(통합 UN) 또는 정규장(J) 참고 시세 조회 (미지원 시 None)."""
         return None
+
+
+def get_market_index_ohlcv(
+    provider: MarketDataProvider,
+    bars: int = 100,
+    end_date: str | None = None,
+    market: str = "KOSPI",
+) -> pd.DataFrame:
+    """하위호환 프로바이더/테스트 목을 보존하며 시장별(KOSPI/KOSDAQ) 지수 일봉을 안전 조회한다."""
+    mkt = str(market or "KOSPI").upper()
+    if mkt != "KOSPI":
+        try:
+            return provider.get_index_ohlcv(bars=bars, end_date=end_date, market=mkt)
+        except TypeError:
+            pass
+    return provider.get_index_ohlcv(bars=bars, end_date=end_date)

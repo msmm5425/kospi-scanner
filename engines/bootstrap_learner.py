@@ -11,7 +11,7 @@ from engines.auto_learner import run_auto_learning
 from engines.error_log import update_error_logs
 from engines.scanner import run_scan
 from engines.top20_analyzer import analyze_top20
-from providers.base import MarketDataProvider
+from providers.base import MarketDataProvider, get_market_index_ohlcv
 from storage.repo import StorageRepo, repo as default_repo
 
 logger = logging.getLogger(__name__)
@@ -29,11 +29,13 @@ class _WalkForwardSliceProvider(MarketDataProvider):
         supply_cache: dict[str, dict[str, Any]],
         index_df: pd.DataFrame,
         sector_map: dict[str, str] | None = None,
+        kosdaq_index_df: pd.DataFrame | None = None,
     ):
         self._universe_meta = {str(u["code"]).zfill(6): u for u in universe_meta}
         self._ohlcv = ohlcv_cache
         self._supply = supply_cache
         self._index_df = index_df
+        self._kosdaq_index_df = kosdaq_index_df if kosdaq_index_df is not None and not kosdaq_index_df.empty else index_df
         self._sector_map = sector_map or {}
         self.current_date: str = ""
 
@@ -60,6 +62,7 @@ class _WalkForwardSliceProvider(MarketDataProvider):
                 {
                     "code": code,
                     "name": meta.get("name", code),
+                    "market": str(meta.get("market") or "KOSPI").upper(),
                     "marcap": int(meta.get("marcap", 500_000_000_000)),
                     "trading_val": float(last.get("amount") or (close_p * float(last["volume"]))),
                     "price": close_p,
@@ -147,9 +150,11 @@ class _WalkForwardSliceProvider(MarketDataProvider):
         self,
         bars: int = 100,
         end_date: str | None = None,
+        market: str = "KOSPI",
     ) -> pd.DataFrame:
         eff = end_date or self.current_date
-        sub = self._index_df[self._index_df["date"] <= eff] if eff else self._index_df
+        base_df = self._kosdaq_index_df if str(market or "KOSPI").upper() == "KOSDAQ" else self._index_df
+        sub = base_df[base_df["date"] <= eff] if eff else base_df
         return sub.tail(bars).reset_index(drop=True)
 
     def get_top_gainers(
@@ -201,7 +206,12 @@ def run_bootstrap_learning(
     store = storage or default_repo
     need_bars = max(185, settings.ohlcv_bars + lookback_days + 15)
 
-    index_df = provider.get_index_ohlcv(bars=min(200, need_bars))
+    index_df = get_market_index_ohlcv(provider, bars=min(200, need_bars), market="KOSPI")
+    kosdaq_index_df = (
+        get_market_index_ohlcv(provider, bars=min(200, need_bars), market="KOSDAQ")
+        if settings.include_kosdaq
+        else None
+    )
     if index_df.empty or len(index_df) < 30:
         return {"days_replayed": 0, "signals_created": 0, "learning": {}}
 
@@ -227,6 +237,7 @@ def run_bootstrap_learning(
         supply_cache=supply_cache,
         index_df=index_df,
         sector_map=provider.get_sector_map(),
+        kosdaq_index_df=kosdaq_index_df,
     )
 
     total_created = 0

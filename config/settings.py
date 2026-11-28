@@ -30,22 +30,22 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def get_dynamic_min_trading_val_krw(now_kst: datetime | None = None) -> int:
-    """장중 시간대별 탄력 최소 거래대금 하한(원) 반환.
+def get_dynamic_min_trading_val_krw(now_kst: datetime | None = None, market: str = "KOSPI") -> int:
+    """장중 시간대·시장(KOSPI/KOSDAQ)별 탄력 최소 거래대금 하한(원) 반환.
 
-    - 프리장(08:00~09:00): 직전 정규장 마감 유동성 기준 15억 원
-    - 09:00 ~ 10:30: 5억 원
-    - 10:30 ~ 13:00: 10억 원
-    - 13:00 이후 (정규장 후반·애프터장·분석 포함): 15억 원
+    - KOSPI: 09:00~10:30 5억 / 10:30~13:00 10억 / 그 외 15억
+    - KOSDAQ: 09:00~10:30 10억 / 10:30~13:00 20억 / 그 외 30억 (변동성·노이즈 필터)
     """
+    is_kosdaq = str(market or "KOSPI").upper() == "KOSDAQ"
+    scale = 2 if is_kosdaq else 1
     if now_kst is None:
-        return 1_500_000_000
+        return 1_500_000_000 * scale
     t = now_kst.timetz().replace(tzinfo=None)
     if dt_time(9, 0) <= t < dt_time(10, 30):
-        return 500_000_000
+        return 500_000_000 * scale
     if dt_time(10, 30) <= t < dt_time(13, 0):
-        return 1_000_000_000
-    return 1_500_000_000
+        return 1_000_000_000 * scale
+    return 1_500_000_000 * scale
 
 
 def classify_market_session(now_kst: datetime | None = None) -> str:
@@ -100,9 +100,12 @@ class Settings:
     dry_run: bool = field(default_factory=lambda: _env_bool("DRY_RUN", False))
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO").strip().upper())
 
-    # 유니버스 필터 (코스피 시총 인플레이션 반영: 500억 ~ 20조)
-    min_marcap_krw: int = 50_000_000_000       # 500억 원
-    max_marcap_krw: int = 20_000_000_000_000   # 20조 원
+    # 유니버스 필터 (KOSPI 500억~20조 / KOSDAQ 1,000억~20조)
+    include_kosdaq: bool = field(default_factory=lambda: _env_bool("INCLUDE_KOSDAQ", True))
+    min_marcap_krw: int = 50_000_000_000         # KOSPI 500억 원
+    max_marcap_krw: int = 20_000_000_000_000     # KOSPI 20조 원
+    kosdaq_min_marcap_krw: int = 100_000_000_000 # KOSDAQ 1,000억 원
+    kosdaq_max_marcap_krw: int = 20_000_000_000_000  # KOSDAQ 20조 원
     top20_min_trading_val_krw: int = 3_000_000_000  # 15:50 분석 최소 거래대금 30억 원
     excluded_name_keywords: tuple[str, ...] = (
         "스팩", "SPAC", "리츠", "REIT", "ETF", "ETN", "인버스", "레버리지",

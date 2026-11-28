@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
             provider=provider,
             storage=default_repo,
             lookback_days=20,
-            max_stocks=60,
+            max_stocks=80,
             dry_run=args.dry_run,
         )
         print(

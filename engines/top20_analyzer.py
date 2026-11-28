@@ -8,7 +8,7 @@ import pandas as pd
 
 from config.settings import KST, settings
 from indicators.technicals import compute_bb_squeeze_percentile, compute_indicators
-from providers.base import MarketDataProvider
+from providers.base import MarketDataProvider, get_market_index_ohlcv
 from risk.rr_geometry import evaluate_rr_geometry
 from storage.repo import StorageRepo, repo as default_repo
 from strategies.common_gate import evaluate_common_gate
@@ -25,6 +25,7 @@ def _diagnose_why_missed(
     index_df: pd.DataFrame,
     marcap_krw: float,
     provider: MarketDataProvider,
+    market: str = "KOSPI",
 ) -> dict[str, Any]:
     """D-1 ~ D-3 시점 데이터로 역산해 가장 적은 미달 항목으로 탈락한 병목 원인 반환."""
     best_candidate: dict[str, Any] | None = None
@@ -50,6 +51,7 @@ def _diagnose_why_missed(
             trading_val=tval_hist,
             marcap_krw=marcap_krw,
             min_trading_val_override=settings.top20_min_trading_val_krw,
+            market=market,
         )
         supply = provider.get_investor_supply(code, days=settings.supply_days, end_date=snap_date)
 
@@ -185,9 +187,9 @@ def analyze_top20(
     as_of_date: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """15:50 코스피 상승률 TOP 20 역추적(Hit vs Miss) 및 Track D 후보 패턴 큐 누적."""
+    """15:50 코스피·코스닥 상승률 TOP 20 역추적(Hit vs Miss) 및 Track D 후보 패턴 큐 누적."""
     store = storage or default_repo
-    index_df = provider.get_index_ohlcv(bars=100, end_date=as_of_date)
+    index_df = get_market_index_ohlcv(provider, bars=100, end_date=as_of_date, market="KOSPI")
     trading_dates = index_df["date"].astype(str).tolist() if not index_df.empty else []
     target_date = (
         trading_dates[-1]
@@ -196,6 +198,9 @@ def analyze_top20(
     )
 
     top20 = provider.get_top_gainers(top_n=20, end_date=as_of_date)
+    index_by_market = {"KOSPI": index_df}
+    if any(str(g.get("market") or "KOSPI").upper() == "KOSDAQ" for g in top20):
+        index_by_market["KOSDAQ"] = get_market_index_ohlcv(provider, bars=100, end_date=as_of_date, market="KOSDAQ")
     recent_signals = store.get_recent_signals_by_trading_days(
         target_date=target_date,
         trading_dates=trading_dates or [target_date],
@@ -223,6 +228,7 @@ def analyze_top20(
     for g in top20:
         code = str(g["code"]).zfill(6)
         name = str(g["name"]).strip()
+        mkt = str(g.get("market") or "KOSPI").upper()
         chg_pct = float(g.get("chg_pct", 0.0))
         marcap_krw = float(g.get("marcap", 0.0))
 
@@ -232,6 +238,7 @@ def analyze_top20(
                 {
                     "code": code,
                     "name": name,
+                    "market": mkt,
                     "chg_pct": chg_pct,
                     "signal_id": sig["signal_id"],
                     "signal_date": sig["signal_date"],
@@ -240,8 +247,9 @@ def analyze_top20(
             )
             continue
 
+        mkt_idx_df = index_by_market.get(mkt, index_df)
         df_full = provider.get_daily_ohlcv(code, bars=settings.ohlcv_bars + 5, end_date=target_date)
-        diag = _diagnose_why_missed(code, df_full, index_df, marcap_krw, provider)
+        diag = _diagnose_why_missed(code, df_full, mkt_idx_df, marcap_krw, provider, market=mkt)
         d1_date = str(df_full.iloc[-2]["date"]) if len(df_full) >= 2 else target_date
         supply_d1 = provider.get_investor_supply(code, days=5, end_date=d1_date)
         feat_tags, rr_meta = _extract_standard_features(code, df_full, supply_d1, sector_sync_codes)
@@ -249,6 +257,7 @@ def analyze_top20(
         miss_rec = {
             "code": code,
             "name": name,
+            "market": mkt,
             "chg_pct": chg_pct,
             "trading_val_uk": round(float(g.get("trading_val", 0.0)) / 1e8, 1),
             "diagnosis": diag["summary"],
@@ -264,6 +273,7 @@ def analyze_top20(
                     "date": target_date,
                     "code": code,
                     "name": name,
+                    "market": mkt,
                     "chg_pct": chg_pct,
                     "nearest_track": diag["nearest_track"],
                     "tags": feat_tags,

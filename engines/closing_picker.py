@@ -7,7 +7,7 @@ from typing import Any
 from config.settings import KST, settings
 from indicators.technicals import compute_indicators
 from notify.telegram_bot import TelegramNotifier
-from providers.base import MarketDataProvider
+from providers.base import MarketDataProvider, get_market_index_ohlcv
 from risk.krx_tick import round_to_tick
 from risk.rr_geometry import _max_risk_limit_for_track
 from storage.repo import StorageRepo, repo as default_repo
@@ -22,10 +22,12 @@ def _closing_audit_single(
     index_df,
     adaptive: dict[str, Any],
     now_kst: datetime,
+    market: str = "KOSPI",
 ) -> dict[str, Any]:
-    """15:00 종가 매수 직전 시점에 당일 포착 종목의 현재가·윗꼬리·1:3 손익비 유효성을 재검증한다."""
+    """15:00 종가 매수 직전 시점에 당일 포착 종목의 현재가·윗꼬리·손익비 유효성을 재검증한다."""
     code = str(sig.get("code") or "").zfill(6)
     name = str(sig.get("name") or "")
+    mkt = str(market or sig.get("market") or (sig.get("snapshot") or {}).get("market") or "KOSPI").upper()
     track = str(sig.get("track") or "")
     rr_orig = sig.get("rr_geometry") or {}
     inval_p = float(rr_orig.get("invalidation_ref_price") or 0.0)
@@ -68,6 +70,7 @@ def _closing_audit_single(
         now_kst=now_kst,
         max_upper_wick_override=adaptive.get("max_upper_wick_ratio"),
         max_disparity_override=adaptive.get("max_disparity_20_pct"),
+        market=mkt,
     )
     if not gate_res["passed"]:
         reasons.extend(gate_res["failed_reasons"])
@@ -122,6 +125,7 @@ def _closing_audit_single(
     return {
         "code": code,
         "name": name,
+        "market": mkt,
         "track": track,
         "track_label": sig.get("track_label", track),
         "signal_id": sig.get("signal_id"),
@@ -162,7 +166,6 @@ def build_and_send_closing_briefing(
     if not force and str(lp.get("last_closing_briefing_date") or "") == today_kst:
         return {"already_sent": True, "date": today_kst, "qualified": [], "invalidated": []}
 
-    index_df = provider.get_index_ohlcv(bars=settings.index_bars)
     adaptive = lp.get("adaptive_params") or {}
     all_signals = store.get_signals()
     today_signals = [
@@ -170,12 +173,18 @@ def build_and_send_closing_briefing(
         for s in all_signals
         if str(s.get("signal_date", "")) == today_kst and str(s.get("origin") or "LIVE").upper() != "BOOTSTRAP"
     ]
+    index_df = get_market_index_ohlcv(provider, bars=settings.index_bars, market="KOSPI")
+    index_by_market = {"KOSPI": index_df}
+    if any(str(s.get("market") or (s.get("snapshot") or {}).get("market") or "KOSPI").upper() == "KOSDAQ" for s in today_signals):
+        index_by_market["KOSDAQ"] = get_market_index_ohlcv(provider, bars=settings.index_bars, market="KOSDAQ")
 
     qualified: list[dict[str, Any]] = []
     invalidated: list[dict[str, Any]] = []
 
     for sig in today_signals:
-        audit = _closing_audit_single(sig, provider, index_df, adaptive, eff_now)
+        sig_mkt = str(sig.get("market") or (sig.get("snapshot") or {}).get("market") or "KOSPI").upper()
+        mkt_idx = index_by_market.get(sig_mkt, index_df)
+        audit = _closing_audit_single(sig, provider, mkt_idx, adaptive, eff_now, market=sig_mkt)
         if not dry_run:
             updated = dict(sig)
             updated["closing_audit"] = {

@@ -11,7 +11,7 @@ from typing import Any
 from config.settings import KST, classify_market_session, get_dynamic_min_trading_val_krw, settings
 from indicators.technicals import compute_indicators
 from notify.telegram_bot import TelegramNotifier
-from providers.base import MarketDataProvider
+from providers.base import MarketDataProvider, get_market_index_ohlcv
 from risk.krx_tick import round_to_tick
 from risk.rr_geometry import evaluate_rr_geometry
 from storage.repo import StorageRepo, repo as default_repo
@@ -77,6 +77,7 @@ def _build_signal_record(
     origin: str = "LIVE",
     learning_profile: dict[str, Any] | None = None,
     session_info: dict[str, Any] | None = None,
+    market: str = "KOSPI",
 ) -> dict[str, Any]:
     track_code = track_res["track"]
     suffix = "D" if track_code.startswith("TRACK_D") else _TRACK_SHORT_SUFFIX.get(track_code, "X")
@@ -85,11 +86,13 @@ def _build_signal_record(
     last_obv = float(df_ind["obv"].iloc[-1])
     last_obv_ma5 = float(df_ind["obv_ma5"].iloc[-1])
     sess = dict(session_info or {"session": "REGULAR"})
+    mkt_norm = str(market or "KOSPI").upper()
 
     record: dict[str, Any] = {
         "signal_id": sig_id,
         "signal_date": signal_date,
         "origin": origin,
+        "market": mkt_norm,
         "session": str(sess.get("session") or "REGULAR"),
         "code": code,
         "name": name,
@@ -108,6 +111,7 @@ def _build_signal_record(
             "max_entry_price": rr_res.get("max_entry_price", rr_res["entry_price"]),
         },
         "snapshot": {
+            "market": mkt_norm,
             "chg_pct": gate_res["metrics"]["chg_pct"],
             "marcap_uk": gate_res["metrics"]["marcap_uk"],
             "trading_val_uk": gate_res["metrics"]["trading_val_uk"],
@@ -183,13 +187,17 @@ def run_scan(
     learning_profile = learning_profile_override or store.load_learning_profile()
     adaptive = learning_profile.get("adaptive_params") or {}
     promoted_track_d = learning_profile.get("promoted_track_d_patterns") or []
-    eff_min_tval = (
-        int(min_trading_val_override)
-        if min_trading_val_override is not None
-        else get_dynamic_min_trading_val_krw(eff_now)
-    )
 
-    index_df = provider.get_index_ohlcv(bars=settings.index_bars)
+    universe = provider.get_universe()
+    markets_in_universe = {str(u.get("market") or "KOSPI").upper() for u in universe} or {"KOSPI"}
+
+    index_df = get_market_index_ohlcv(provider, bars=settings.index_bars, market="KOSPI")
+    index_by_market: dict[str, Any] = {"KOSPI": index_df}
+    if "KOSDAQ" in markets_in_universe:
+        index_by_market["KOSDAQ"] = get_market_index_ohlcv(provider, bars=settings.index_bars, market="KOSDAQ")
+        if index_df.empty and not index_by_market["KOSDAQ"].empty:
+            index_df = index_by_market["KOSDAQ"]
+
     trading_dates = index_df["date"].astype(str).tolist() if not index_df.empty else []
     # 프리장은 당일 정규장 개장 전이므로 오늘 날짜로 시그널 ID·쿨다운 관리 (전략 평가는 T-1 정규장 일봉 기준)
     if session_type == "PREMARKET":
@@ -199,7 +207,6 @@ def run_scan(
     else:
         signal_date = trading_dates[-1] if trading_dates else today_kst
 
-    universe = provider.get_universe()
     stats: dict[str, int] = {
         "universe_count": len(universe),
         "pre_filtered_out": 0,
@@ -219,12 +226,18 @@ def run_scan(
     for item in universe:
         code = str(item["code"]).zfill(6)
         name = str(item["name"]).strip()
+        item_market = str(item.get("market") or "KOSPI").upper()
+        item_min_tval = (
+            int(min_trading_val_override)
+            if min_trading_val_override is not None
+            else get_dynamic_min_trading_val_krw(eff_now, market=item_market)
+        )
         marcap = float(item.get("marcap", 0.0))
         u_tval = float(item.get("trading_val", 0.0))
         u_chg = float(item.get("chg_pct", 0.0))
 
         # 유니버스 스냅샷 단계 사전 가지치기 (불필요한 API 호출 절감)
-        tval_floor = eff_min_tval * (0.85 if session_type == "AFTERMARKET" else 0.5)
+        tval_floor = item_min_tval * (0.85 if session_type == "AFTERMARKET" else 0.5)
         if u_tval > 0 and u_tval < tval_floor:
             stats["pre_filtered_out"] += 1
             continue
@@ -248,13 +261,26 @@ def run_scan(
             logger.debug("Cooldown skip %s (%s): %s", name, code, cd_reason)
             continue
 
-        candidates.append({"code": code, "name": name, "marcap": marcap, "u_tval": u_tval, "u_price": float(item.get("price") or 0.0)})
+        candidates.append(
+            {
+                "code": code,
+                "name": name,
+                "market": item_market,
+                "eff_min_tval": item_min_tval,
+                "marcap": marcap,
+                "u_tval": u_tval,
+                "u_price": float(item.get("price") or 0.0),
+            }
+        )
 
     def _inspect_candidate(cand: dict[str, Any]) -> dict[str, Any]:
         code = cand["code"]
         name = cand["name"]
+        item_market = cand["market"]
+        cand_min_tval = cand["eff_min_tval"]
         marcap = cand["marcap"]
         u_tval = cand["u_tval"]
+        mkt_index_df = index_by_market.get(item_market, index_df)
 
         safety = provider.get_safety_status(code)
         if not safety.get("is_safe", False):
@@ -268,7 +294,7 @@ def run_scan(
             s_open = float(safety.get("open") or 0.0)
             s_high = float(safety.get("high") or 0.0)
             s_low = float(safety.get("low") or 0.0)
-            if s_tval > 0 and s_tval < (eff_min_tval * 0.95):
+            if s_tval > 0 and s_tval < (cand_min_tval * 0.95):
                 return {"outcome": "gate_rejected"}
             if s_chg != 0.0 and (s_chg < (settings.min_chg_pct - 0.15) or s_chg > (settings.max_chg_pct + 0.15)):
                 return {"outcome": "gate_rejected"}
@@ -317,13 +343,14 @@ def run_scan(
         )
         gate_res = evaluate_common_gate(
             df=df_ind,
-            index_df=index_df,
+            index_df=mkt_index_df,
             trading_val=eval_tval,
             marcap_krw=marcap,
             now_kst=eff_now,
-            min_trading_val_override=min_trading_val_override,
+            min_trading_val_override=cand_min_tval,
             max_upper_wick_override=adaptive.get("max_upper_wick_ratio"),
             max_disparity_override=adaptive.get("max_disparity_20_pct"),
+            market=item_market,
         )
         if not gate_res["passed"]:
             return {"outcome": "gate_rejected"}
@@ -349,6 +376,7 @@ def run_scan(
                 near_item = {
                     "code": code,
                     "name": name,
+                    "market": item_market,
                     "price": int(round(entry_price)),
                     "chg_pct": gate_res["metrics"]["chg_pct"],
                     "track": best_diag.get("track_label") or best_diag.get("track"),
@@ -383,6 +411,7 @@ def run_scan(
                 "rr_rejection": {
                     "code": code,
                     "name": name,
+                    "market": item_market,
                     "track": passed_track["track"],
                     "reason": rr_res["reject_reason"],
                     "risk_pct": rr_res["risk_pct"],
@@ -424,6 +453,7 @@ def run_scan(
                         "rr_rejection": {
                             "code": code,
                             "name": name,
+                            "market": item_market,
                             "track": passed_track["track"],
                             "reason": f"프리장 갭과열 ({int(ext_p):,}원 > 정규장 상한 {int(max_p):,}원)",
                             "risk_pct": rr_res["risk_pct"],
@@ -444,6 +474,7 @@ def run_scan(
             origin=origin,
             learning_profile=learning_profile,
             session_info=session_info,
+            market=item_market,
         )
         return {"outcome": "matched", "signal": sig}
 
@@ -486,6 +517,7 @@ def run_scan(
         "signal_date": signal_date,
         "session": session_type,
         "provider": provider.provider_name,
+        "markets": sorted(markets_in_universe),
         "stats": stats,
         "signals": captured_signals,
         "rr_rejections": rr_rejections,
@@ -503,7 +535,7 @@ class _LoopSessionCacheProvider(MarketDataProvider):
         self._lock = threading.RLock()
         self._last_session = ""
         self._last_date = ""
-        self._index_cache: tuple[float, Any] | None = None
+        self._index_cache: dict[str, tuple[float, Any]] = {}
         self._ohlcv_cache: dict[str, tuple[float, Any]] = {}
         self._supply_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
@@ -512,7 +544,7 @@ class _LoopSessionCacheProvider(MarketDataProvider):
         curr_sess = classify_market_session(eff_now)
         with self._lock:
             if curr_date != self._last_date or curr_sess != self._last_session:
-                self._index_cache = None
+                self._index_cache.clear()
                 self._ohlcv_cache.clear()
                 self._supply_cache.clear()
                 self._last_date = curr_date
@@ -549,14 +581,16 @@ class _LoopSessionCacheProvider(MarketDataProvider):
             self._supply_cache[code] = (now_ts, sup)
         return dict(sup)
 
-    def get_index_ohlcv(self, bars: int = 100, end_date: str | None = None):
+    def get_index_ohlcv(self, bars: int = 100, end_date: str | None = None, market: str = "KOSPI"):
+        mkt = str(market or "KOSPI").upper()
         now_ts = time.time()
         with self._lock:
-            if self._index_cache and (now_ts - self._index_cache[0]) < 300.0:
-                return self._index_cache[1].copy()
-        df = self._inner.get_index_ohlcv(bars=bars, end_date=end_date)
+            cached = self._index_cache.get(mkt)
+            if cached and (now_ts - cached[0]) < 300.0:
+                return cached[1].copy()
+        df = get_market_index_ohlcv(self._inner, bars=bars, end_date=end_date, market=mkt)
         with self._lock:
-            self._index_cache = (now_ts, df)
+            self._index_cache[mkt] = (now_ts, df)
         return df.copy()
 
     def get_top_gainers(self, top_n: int = 20, end_date: str | None = None):

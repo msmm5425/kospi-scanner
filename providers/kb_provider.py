@@ -72,6 +72,7 @@ class KBProvider(MarketDataProvider):
         self,
         bars: int = 100,
         end_date: str | None = None,
+        market: str = "KOSPI",
     ) -> pd.DataFrame:
         self._guard_environment()
         raise NotImplementedError("KB증권 Open API 지수 일봉 엔드포인트 연결 대기 중")

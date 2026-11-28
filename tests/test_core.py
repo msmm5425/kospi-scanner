@@ -178,11 +178,13 @@ class MockProvider(MarketDataProvider):
         index_df: pd.DataFrame,
         top_gainers: list[dict[str, Any]] | None = None,
         safety_overrides: dict[str, dict[str, Any]] | None = None,
+        kosdaq_index_df: pd.DataFrame | None = None,
     ):
         self.universe = universe
         self.ohlcv_map = ohlcv_map
         self.supply_map = supply_map
         self.index_df = index_df
+        self.kosdaq_index_df = kosdaq_index_df if kosdaq_index_df is not None else index_df
         self.top_gainers = top_gainers or []
         self.safety_overrides = safety_overrides or {}
 
@@ -216,8 +218,9 @@ class MockProvider(MarketDataProvider):
             return sup(end_date)
         return dict(sup or {"frgn_today": 0, "orgn_today": 0, "frgn_3d": 0, "orgn_3d": 0, "total_5d": 0, "pos_days_5d": 0, "intraday_pending": False})
 
-    def get_index_ohlcv(self, bars: int = 100, end_date: str | None = None) -> pd.DataFrame:
-        df = self.index_df.copy()
+    def get_index_ohlcv(self, bars: int = 100, end_date: str | None = None, market: str = "KOSPI") -> pd.DataFrame:
+        src = self.kosdaq_index_df if str(market or "KOSPI").upper() == "KOSDAQ" else self.index_df
+        df = src.copy()
         if end_date:
             df = df[df["date"] <= end_date]
         return df.tail(bars).reset_index(drop=True)
@@ -1346,3 +1349,119 @@ def test_quant_relaxed_thresholds_capture_real_breakouts() -> None:
     st_res = evaluate_track_a(compute_indicators(df_stair), sup_2d)
     assert st_res["passed"] is True, st_res["failed_reasons"]
     assert ((st_c - float(st_res["invalidation_raw"])) / st_c * 100.0) <= 6.5
+
+
+def test_kosdaq_dual_market_universe_index_and_liquidity_cutoffs(tmp_path) -> None:
+    from notify.telegram_bot import format_scan_diagnostic_summary
+    from providers.kis_provider import KISProvider
+    from providers.naver_fallback import fetch_naver_index_ohlcv, fetch_naver_market_universe
+
+    class _FakeResp:
+        def __init__(self, status_code: int, payload: Any = None, content: bytes = b""):
+            self.status_code = status_code
+            self._payload = payload
+            self.content = content
+
+        def json(self) -> Any:
+            return self._payload
+
+    class _FakeSess:
+        def get(self, url: str, headers=None, timeout: float = 10.0):
+            if "marketValue/KOSDAQ" in url:
+                return _FakeResp(
+                    200,
+                    {
+                        "stocks": [
+                            {
+                                "itemCode": "247540",
+                                "stockName": "에코프로비엠",
+                                "stockEndType": "stock",
+                                "closePriceRaw": "150000",
+                                "fluctuationsRatio": "4.2",
+                                "accumulatedTradingVolumeRaw": "300000",
+                                "accumulatedTradingValueRaw": "45000000000",
+                                "marketValueRaw": "14000000000000",
+                            },
+                            {
+                                "itemCode": "999990",
+                                "stockName": "소형코스닥",
+                                "stockEndType": "stock",
+                                "closePriceRaw": "5000",
+                                "fluctuationsRatio": "5.0",
+                                "accumulatedTradingVolumeRaw": "400000",
+                                "accumulatedTradingValueRaw": "2000000000",
+                                "marketValueRaw": "70000000000",  # 700억 < KOSDAQ 하한 1,000억 제외
+                            },
+                        ]
+                    },
+                )
+            if "sise.nhn?symbol=KOSDAQ" in url:
+                xml = """<?xml version="1.0" encoding="EUC-KR"?>
+                <protocol><chartdata symbol="KOSDAQ">
+                  <item data="20261126|690.0|695.0|685.0|690.0|100000" />
+                  <item data="20261127|692.0|710.0|690.0|708.99|120000" />
+                </chartdata></protocol>"""
+                return _FakeResp(200, content=xml.encode("euc-kr"))
+            return _FakeResp(404, {})
+
+    kq_uni = fetch_naver_market_universe(market="KOSDAQ", session=_FakeSess())
+    assert len(kq_uni) == 1
+    assert kq_uni[0]["code"] == "247540"
+    assert kq_uni[0]["market"] == "KOSDAQ"
+
+    kq_idx = fetch_naver_index_ohlcv(bars=5, market="KOSDAQ", session=_FakeSess())
+    assert len(kq_idx) == 2
+    assert float(kq_idx.iloc[-1]["close"]) == 708.99
+
+    # KISProvider.get_index_ohlcv: KOSPI('0001') vs KOSDAQ('1001') 분기 확인
+    seen_iscd: list[str] = []
+    kis = KISProvider()
+    kis.app_key = "k"
+    kis.app_secret = "s"
+
+    def _fake_get(path: str, tr_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        seen_iscd.append(str(params.get("FID_INPUT_ISCD")))
+        return {
+            "rt_cd": "0",
+            "output2": [
+                {"stck_bsop_date": "20261127", "bstp_nmix_prpr": "708.99" if params.get("FID_INPUT_ISCD") == "1001" else "4915.00"},
+                {"stck_bsop_date": "20261126", "bstp_nmix_prpr": "690.00" if params.get("FID_INPUT_ISCD") == "1001" else "4711.00"},
+            ],
+        }
+
+    kis._request_get = _fake_get  # type: ignore[method-assign]
+    assert float(kis.get_index_ohlcv(bars=5, market="KOSDAQ").iloc[-1]["close"]) == 708.99
+    assert float(kis.get_index_ohlcv(bars=5, market="KOSPI").iloc[-1]["close"]) == 4915.0
+    assert seen_iscd == ["1001", "0001"]
+
+    # run_scan에서 KOSDAQ 종목은 거래대금 30억 기준(20억 탈락) 및 KOSDAQ 지수 약세 별도 반영 검증
+    dates = _trading_dates(160, end="2026-11-27")
+    df_pass = _make_track_a_vcp_df(dates)
+    df_low_tv = _make_track_a_vcp_df(dates)
+    df_low_tv.loc[df_low_tv.index[-1], "amount"] = 2_000_000_000.0  # 20억 (KOSDAQ 30억 미달)
+    sup_good = {"frgn_today": 10_000, "orgn_today": 15_000, "frgn_3d": 40_000, "orgn_3d": 30_000, "total_5d": 90_000, "pos_days_5d": 4, "intraday_pending": False}
+    p_dual = MockProvider(
+        universe=[
+            {"code": "247540", "name": "코스닥주도주", "market": "KOSDAQ", "marcap": 2_000_000_000_000, "trading_val": float(df_pass.iloc[-1]["amount"]), "price": float(df_pass.iloc[-1]["close"]), "chg_pct": 4.2},
+            {"code": "247550", "name": "코스닥유동성미달", "market": "KOSDAQ", "marcap": 200_000_000_000, "trading_val": 2_000_000_000.0, "price": float(df_low_tv.iloc[-1]["close"]), "chg_pct": 4.2},
+        ],
+        ohlcv_map={"247540": df_pass, "247550": df_low_tv},
+        supply_map={"247540": sup_good, "247550": sup_good},
+        index_df=_make_index_df(dates, weak=False),       # KOSPI 정상
+        kosdaq_index_df=_make_index_df(dates, weak=True), # KOSDAQ 약세
+    )
+    res = run_scan(
+        provider=p_dual,
+        storage=StorageRepo(data_dir=tmp_path),
+        now_kst=datetime(2026, 11, 27, 15, 35, tzinfo=KST),
+        dry_run=True,
+        send_notifications=False,
+    )
+    assert res["stats"]["pre_filtered_out"] == 1
+    assert res["stats"]["matched_count"] == 1
+    sig = res["signals"][0]
+    assert sig["market"] == "KOSDAQ"
+    assert sig["snapshot"]["market_regime"] == "WEAK"  # KOSDAQ 지수 약세 반영 확인
+    summary_txt = format_scan_diagnostic_summary(res)
+    assert "KOSPI·KOSDAQ 차트 매수픽 점검" in summary_txt
+    assert "[KOSDAQ]" in summary_txt

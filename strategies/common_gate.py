@@ -9,8 +9,9 @@ from config.settings import KST, get_dynamic_min_trading_val_krw, settings
 from indicators.technicals import compute_relative_strength
 
 
-def evaluate_market_regime(index_df: pd.DataFrame) -> dict[str, Any]:
-    """KOSPI 지수 20일선 하회 또는 당일 -1.5% 이하 급락 시 WEAK 태깅."""
+def evaluate_market_regime(index_df: pd.DataFrame, market: str = "KOSPI") -> dict[str, Any]:
+    """KOSPI/KOSDAQ 지수 20일선 하회 또는 당일 -1.5% 이하 급락 시 WEAK 태깅."""
+    mkt_label = "KOSDAQ" if str(market or "KOSPI").upper() == "KOSDAQ" else "KOSPI"
     if index_df is None or index_df.empty:
         return {
             "market_regime": "NORMAL",
@@ -28,9 +29,9 @@ def evaluate_market_regime(index_df: pd.DataFrame) -> dict[str, Any]:
 
     reasons: list[str] = []
     if ma20 > 0 and last_close < ma20:
-        reasons.append(f"KOSPI 20일선 하회({last_close:,.2f} < {ma20:,.2f})")
+        reasons.append(f"{mkt_label} 20일선 하회({last_close:,.2f} < {ma20:,.2f})")
     if last_chg <= settings.weak_regime_index_drop_pct:
-        reasons.append(f"KOSPI 급락({last_chg:+.2f}%)")
+        reasons.append(f"{mkt_label} 급락({last_chg:+.2f}%)")
 
     regime = "WEAK" if reasons else "NORMAL"
     return {
@@ -51,13 +52,14 @@ def evaluate_common_gate(
     min_trading_val_override: int | None = None,
     max_upper_wick_override: float | None = None,
     max_disparity_override: float | None = None,
+    market: str = "KOSPI",
 ) -> dict[str, Any]:
     """Track A/B/C 검사 전 공통 기술적 · 추격 방지 · 유동성 관문 평가."""
-    regime_info = evaluate_market_regime(index_df)
+    regime_info = evaluate_market_regime(index_df, market=market)
     min_tval = (
         int(min_trading_val_override)
         if min_trading_val_override is not None
-        else get_dynamic_min_trading_val_krw(now_kst or datetime.now(tz=KST))
+        else get_dynamic_min_trading_val_krw(now_kst or datetime.now(tz=KST), market=market)
     )
     max_wick = (
         float(max_upper_wick_override)
