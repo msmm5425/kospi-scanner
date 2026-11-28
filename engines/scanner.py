@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import subprocess
+import threading
 import time
 from datetime import datetime
 from typing import Any
@@ -212,6 +214,7 @@ def run_scan(
     captured_signals: list[dict[str, Any]] = []
     rr_rejections: list[dict[str, Any]] = []
     near_misses: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
 
     for item in universe:
         code = str(item["code"]).zfill(6)
@@ -221,10 +224,16 @@ def run_scan(
         u_chg = float(item.get("chg_pct", 0.0))
 
         # 유니버스 스냅샷 단계 사전 가지치기 (불필요한 API 호출 절감)
-        if u_tval > 0 and u_tval < (eff_min_tval * 0.5):
+        tval_floor = eff_min_tval * (0.85 if session_type == "AFTERMARKET" else 0.5)
+        if u_tval > 0 and u_tval < tval_floor:
             stats["pre_filtered_out"] += 1
             continue
-        if session_type in {"REGULAR", "AFTERMARKET"} and u_chg != 0.0 and (u_chg < -1.0 or u_chg > (settings.max_chg_pct + 1.0)):
+        if session_type == "AFTERMARKET" and u_chg != 0.0 and (
+            u_chg < (settings.min_chg_pct - 0.5) or u_chg > (settings.max_chg_pct + 0.5)
+        ):
+            stats["pre_filtered_out"] += 1
+            continue
+        if session_type == "REGULAR" and u_chg != 0.0 and (u_chg < -1.0 or u_chg > (settings.max_chg_pct + 1.0)):
             stats["pre_filtered_out"] += 1
             continue
 
@@ -239,11 +248,26 @@ def run_scan(
             logger.debug("Cooldown skip %s (%s): %s", name, code, cd_reason)
             continue
 
+        candidates.append({"code": code, "name": name, "marcap": marcap, "u_tval": u_tval, "u_price": float(item.get("price") or 0.0)})
+
+    def _inspect_candidate(cand: dict[str, Any]) -> dict[str, Any]:
+        code = cand["code"]
+        name = cand["name"]
+        marcap = cand["marcap"]
+        u_tval = cand["u_tval"]
+
         safety = provider.get_safety_status(code)
         if not safety.get("is_safe", False):
-            stats["safety_rejected"] += 1
             logger.debug("Safety skip %s (%s): %s", name, code, safety.get("reject_reason"))
-            continue
+            return {"outcome": "safety_rejected"}
+
+        if session_type in {"REGULAR", "AFTERMARKET"}:
+            s_tval = float(safety.get("trading_val") or 0.0)
+            s_chg = float(safety.get("chg_pct") or 0.0)
+            if s_tval > 0 and s_tval < (eff_min_tval * 0.95):
+                return {"outcome": "gate_rejected"}
+            if s_chg != 0.0 and (s_chg < (settings.min_chg_pct - 0.15) or s_chg > (settings.max_chg_pct + 0.15)):
+                return {"outcome": "gate_rejected"}
 
         df_raw = provider.get_daily_ohlcv(code, bars=settings.ohlcv_bars)
         if session_type == "PREMARKET" and not df_raw.empty:
@@ -252,7 +276,7 @@ def run_scan(
 
         if session_type == "REGULAR" and not df_raw.empty:
             live_tval = float(safety.get("trading_val") or u_tval)
-            live_price = float(safety.get("price") or item.get("price") or 0.0)
+            live_price = float(safety.get("price") or cand["u_price"] or 0.0)
             if str(df_raw["date"].iloc[-1]) == signal_date and live_price > 0:
                 last_i = df_raw.index[-1]
                 df_raw.loc[last_i, "close"] = live_price
@@ -267,8 +291,7 @@ def run_scan(
 
         df_ind = compute_indicators(df_raw)
         if df_ind.empty or len(df_ind) < 25:
-            stats["gate_rejected"] += 1
-            continue
+            return {"outcome": "gate_rejected"}
 
         # 프리장/애프터장에서도 entry_price 및 모든 기술 지표는 정규장 일봉 기준 고정
         entry_price = (
@@ -292,8 +315,7 @@ def run_scan(
             max_disparity_override=adaptive.get("max_disparity_20_pct"),
         )
         if not gate_res["passed"]:
-            stats["gate_rejected"] += 1
-            continue
+            return {"outcome": "gate_rejected"}
 
         supply = provider.get_investor_supply(code, days=settings.supply_days)
         passed_track, track_diags = _evaluate_priority_tracks(
@@ -303,7 +325,6 @@ def run_scan(
             promoted_track_d=promoted_track_d,
         )
         if passed_track is None:
-            stats["strategy_rejected"] += 1
             best_diag = max(
                 track_diags,
                 key=lambda d: (
@@ -312,20 +333,19 @@ def run_scan(
                 ),
                 default=None,
             )
+            near_item = None
             if best_diag and int(best_diag.get("passed_count", 0)) >= max(1, int(best_diag.get("total_checks", 1)) - 2):
-                near_misses.append(
-                    {
-                        "code": code,
-                        "name": name,
-                        "price": int(round(entry_price)),
-                        "chg_pct": gate_res["metrics"]["chg_pct"],
-                        "track": best_diag.get("track_label") or best_diag.get("track"),
-                        "passed_count": int(best_diag.get("passed_count", 0)),
-                        "total_checks": int(best_diag.get("total_checks", 1)),
-                        "reasons": best_diag.get("failed_reasons") or [],
-                    }
-                )
-            continue
+                near_item = {
+                    "code": code,
+                    "name": name,
+                    "price": int(round(entry_price)),
+                    "chg_pct": gate_res["metrics"]["chg_pct"],
+                    "track": best_diag.get("track_label") or best_diag.get("track"),
+                    "passed_count": int(best_diag.get("passed_count", 0)),
+                    "total_checks": int(best_diag.get("total_checks", 1)),
+                    "reasons": best_diag.get("failed_reasons") or [],
+                }
+            return {"outcome": "strategy_rejected", "near_miss": near_item}
 
         tr_group = "TRACK_D" if passed_track["track"].startswith("TRACK_D") else passed_track["track"]
         t_risk_mult = float((adaptive.get("track_risk_mult") or {}).get(tr_group, 1.0))
@@ -347,9 +367,9 @@ def run_scan(
             risk_mult=eff_risk_mult,
         )
         if not rr_res["passed"]:
-            stats["rr_rejected"] += 1
-            rr_rejections.append(
-                {
+            return {
+                "outcome": "rr_rejected",
+                "rr_rejection": {
                     "code": code,
                     "name": name,
                     "track": passed_track["track"],
@@ -357,9 +377,8 @@ def run_scan(
                     "risk_pct": rr_res["risk_pct"],
                     "clear_upside_pct": rr_res["clear_upside_pct"],
                     "projected_rr": rr_res["projected_rr"],
-                }
-            )
-            continue
+                },
+            }
 
         session_info: dict[str, Any] = {
             "session": session_type,
@@ -389,9 +408,9 @@ def run_scan(
                 if session_type == "PREMARKET" and ext_p > max_p * (
                     1.0 + settings.premarket_max_gap_over_ceiling_pct / 100.0
                 ):
-                    stats["rr_rejected"] += 1
-                    rr_rejections.append(
-                        {
+                    return {
+                        "outcome": "rr_rejected",
+                        "rr_rejection": {
                             "code": code,
                             "name": name,
                             "track": passed_track["track"],
@@ -399,11 +418,9 @@ def run_scan(
                             "risk_pct": rr_res["risk_pct"],
                             "clear_upside_pct": rr_res["clear_upside_pct"],
                             "projected_rr": rr_res["projected_rr"],
-                        }
-                    )
-                    continue
+                        },
+                    }
 
-        stats["matched_count"] += 1
         sig = _build_signal_record(
             signal_date=signal_date,
             code=code,
@@ -417,13 +434,37 @@ def run_scan(
             learning_profile=learning_profile,
             session_info=session_info,
         )
-        captured_signals.append(sig)
+        return {"outcome": "matched", "signal": sig}
 
-        is_new = True if dry_run else store.upsert_signal(sig)
-        if is_new:
-            stats["new_signals_saved"] += 1
-            if send_notifications:
-                bot.send_signal_alert(sig)
+    max_workers = 1 if (len(candidates) <= 1 or provider.provider_name in {"mock", "bootstrap_slice"}) else min(6, len(candidates))
+    if max_workers <= 1:
+        results = [_inspect_candidate(c) for c in candidates]
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            results = list(pool.map(_inspect_candidate, candidates))
+
+    for out in results:
+        kind = out["outcome"]
+        if kind == "safety_rejected":
+            stats["safety_rejected"] += 1
+        elif kind == "gate_rejected":
+            stats["gate_rejected"] += 1
+        elif kind == "strategy_rejected":
+            stats["strategy_rejected"] += 1
+            if out.get("near_miss"):
+                near_misses.append(out["near_miss"])
+        elif kind == "rr_rejected":
+            stats["rr_rejected"] += 1
+            rr_rejections.append(out["rr_rejection"])
+        elif kind == "matched":
+            stats["matched_count"] += 1
+            sig = out["signal"]
+            captured_signals.append(sig)
+            is_new = True if dry_run else store.upsert_signal(sig)
+            if is_new:
+                stats["new_signals_saved"] += 1
+                if send_notifications:
+                    bot.send_signal_alert(sig)
 
     captured_signals.sort(key=lambda s: s["rr_geometry"]["projected_rr"], reverse=True)
     near_misses.sort(
@@ -448,6 +489,7 @@ class _LoopSessionCacheProvider(MarketDataProvider):
     def __init__(self, inner: MarketDataProvider):
         self._inner = inner
         self.provider_name = inner.provider_name
+        self._lock = threading.RLock()
         self._last_session = ""
         self._last_date = ""
         self._index_cache: tuple[float, Any] | None = None
@@ -457,12 +499,13 @@ class _LoopSessionCacheProvider(MarketDataProvider):
     def _maybe_reset_on_transition(self, eff_now: datetime) -> None:
         curr_date = eff_now.strftime("%Y-%m-%d")
         curr_sess = classify_market_session(eff_now)
-        if curr_date != self._last_date or curr_sess != self._last_session:
-            self._index_cache = None
-            self._ohlcv_cache.clear()
-            self._supply_cache.clear()
-            self._last_date = curr_date
-            self._last_session = curr_sess
+        with self._lock:
+            if curr_date != self._last_date or curr_sess != self._last_session:
+                self._index_cache = None
+                self._ohlcv_cache.clear()
+                self._supply_cache.clear()
+                self._last_date = curr_date
+                self._last_session = curr_sess
 
     def _ttl(self) -> float:
         return 900.0 if self._last_session == "REGULAR" else 3600.0
@@ -475,28 +518,34 @@ class _LoopSessionCacheProvider(MarketDataProvider):
 
     def get_daily_ohlcv(self, code: str, bars: int = 150, end_date: str | None = None):
         now_ts = time.time()
-        cached = self._ohlcv_cache.get(code)
-        if cached and (now_ts - cached[0]) < self._ttl():
-            return cached[1].copy()
+        with self._lock:
+            cached = self._ohlcv_cache.get(code)
+            if cached and (now_ts - cached[0]) < self._ttl():
+                return cached[1].copy()
         df = self._inner.get_daily_ohlcv(code, bars=bars, end_date=end_date)
-        self._ohlcv_cache[code] = (now_ts, df)
+        with self._lock:
+            self._ohlcv_cache[code] = (now_ts, df)
         return df.copy()
 
     def get_investor_supply(self, code: str, days: int = 5, end_date: str | None = None):
         now_ts = time.time()
-        cached = self._supply_cache.get(code)
-        if cached and (now_ts - cached[0]) < max(self._ttl(), 1800.0):
-            return dict(cached[1])
+        with self._lock:
+            cached = self._supply_cache.get(code)
+            if cached and (now_ts - cached[0]) < max(self._ttl(), 1800.0):
+                return dict(cached[1])
         sup = self._inner.get_investor_supply(code, days=days, end_date=end_date)
-        self._supply_cache[code] = (now_ts, sup)
+        with self._lock:
+            self._supply_cache[code] = (now_ts, sup)
         return dict(sup)
 
     def get_index_ohlcv(self, bars: int = 100, end_date: str | None = None):
         now_ts = time.time()
-        if self._index_cache and (now_ts - self._index_cache[0]) < 300.0:
-            return self._index_cache[1].copy()
+        with self._lock:
+            if self._index_cache and (now_ts - self._index_cache[0]) < 300.0:
+                return self._index_cache[1].copy()
         df = self._inner.get_index_ohlcv(bars=bars, end_date=end_date)
-        self._index_cache = (now_ts, df)
+        with self._lock:
+            self._index_cache = (now_ts, df)
         return df.copy()
 
     def get_top_gainers(self, top_n: int = 20, end_date: str | None = None):

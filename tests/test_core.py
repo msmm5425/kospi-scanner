@@ -1140,3 +1140,105 @@ def test_main_scan_latest_trading_day_cli(monkeypatch) -> None:
     assert provider.as_of_date == "2026-11-27"
     assert len(sent_msgs) == 1
     assert "주말점검주" in sent_msgs[0]
+
+
+def test_parallel_scanner_early_safety_filter_and_kis_thread_safety(monkeypatch) -> None:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    import providers.kis_provider as kis_mod
+    from config.settings import KST
+    from engines.scanner import run_scan
+    from providers.kis_provider import KISProvider
+
+    kis = KISProvider(as_of_date="2026-11-27")
+    kis.app_key = "k"
+    kis.app_secret = "s"
+    barrier = threading.Barrier(2)
+
+    def _grab_session(_idx: int) -> int:
+        barrier.wait(timeout=5.0)
+        return id(kis._session)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sess_ids = list(pool.map(_grab_session, range(2)))
+    assert len(set(sess_ids)) == 2
+
+    calls = {"n": 0}
+
+    class _FakeHttp:
+        def get(self, *_args, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return SimpleNamespace(status_code=200, json=lambda: {"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "rate"})
+            return SimpleNamespace(status_code=200, json=lambda: {"rt_cd": "0", "output": {"ok": 1}})
+
+    monkeypatch.setattr(kis_mod.time, "sleep", lambda _s: None)
+    kis._ensure_token = lambda force_refresh=False: "dummy"  # type: ignore[method-assign]
+    kis._session = _FakeHttp()
+    before_iv = kis._min_interval_sec
+    res = kis._request_get("/uapi/test", "TESTTR", {})
+    assert res["output"]["ok"] == 1
+    assert kis._min_interval_sec > before_iv
+
+    dates = _trading_dates(160, end="2026-11-27")
+    df_a = _make_track_a_vcp_df(dates)
+    close_p = float(df_a.iloc[-1]["close"])
+    tval = float(df_a.iloc[-1]["amount"])
+    sup_good = {"frgn_today": 10_000, "orgn_today": 15_000, "frgn_3d": 40_000, "orgn_3d": 30_000, "total_5d": 90_000, "pos_days_5d": 4, "intraday_pending": False}
+
+    provider = MockProvider(
+        universe=[
+            {"code": "100001", "name": "통과후보", "marcap": 600_000_000_000, "trading_val": tval, "price": close_p, "chg_pct": 4.2},
+            {"code": "100002", "name": "안전수치탈락", "marcap": 600_000_000_000, "trading_val": tval, "price": close_p, "chg_pct": 4.2},
+            {"code": "100003", "name": "사전탈락등락", "marcap": 600_000_000_000, "trading_val": tval, "price": close_p, "chg_pct": -2.5},
+        ],
+        ohlcv_map={"100001": df_a, "100002": df_a},
+        supply_map={"100001": sup_good, "100002": sup_good},
+        index_df=_make_index_df(dates, weak=False),
+    )
+    provider.provider_name = "kis"
+    rec_lock = threading.Lock()
+    safety_calls: list[str] = []
+    ohlcv_calls: list[str] = []
+    orig_ohlcv = provider.get_daily_ohlcv
+
+    def _safety(code: str) -> dict[str, Any]:
+        with rec_lock:
+            safety_calls.append(code)
+        chg = 0.4 if code == "100002" else 4.2
+        return {"is_safe": True, "reject_reason": "", "price": close_p, "chg_pct": chg, "trading_val": tval}
+
+    def _ohlcv(code: str, bars: int = 150, end_date: str | None = None):
+        with rec_lock:
+            ohlcv_calls.append(code)
+        return orig_ohlcv(code, bars=bars, end_date=end_date)
+
+    provider.get_safety_status = _safety  # type: ignore[method-assign]
+    provider.get_daily_ohlcv = _ohlcv  # type: ignore[method-assign]
+
+    class _FakeStorage:
+        def load_learning_profile(self) -> dict[str, Any]:
+            return {"adaptive_params": {}, "promoted_track_d_patterns": []}
+
+        def is_in_cooldown(self, **_kwargs) -> tuple[bool, str]:
+            return False, ""
+
+    scan_res = run_scan(
+        provider=provider,
+        storage=_FakeStorage(),  # type: ignore[arg-type]
+        now_kst=datetime(2026, 11, 27, 18, 0, tzinfo=KST),
+        dry_run=True,
+        send_notifications=False,
+        session_override="AFTERMARKET",
+    )
+    assert scan_res["stats"]["pre_filtered_out"] == 1
+    assert scan_res["stats"]["gate_rejected"] == 1
+    assert scan_res["stats"]["matched_count"] == 1
+    assert scan_res["signals"][0]["code"] == "100001"
+    assert "100003" not in safety_calls
+    assert "100002" in safety_calls
+    assert "100002" not in ohlcv_calls
+    assert "100001" in ohlcv_calls

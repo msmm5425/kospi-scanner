@@ -123,9 +123,10 @@ class KISProvider(MarketDataProvider):
         if settings.kis_is_paper and "openapi.koreainvestment.com" in self.base_url:
             self.base_url = "https://openapivts.koreainvestment.com:29443"
         self._lock = threading.RLock()
-        self._session = requests.Session()
+        self._local = threading.local()
+        self._override_session: Any = None
         self._last_req_ts = 0.0
-        self._min_interval_sec = 0.10  # KIS 실전 앱키 초당 20건 한도 내 고속 스캔 간격 (~10 req/s)
+        self._min_interval_sec = 0.13  # KIS 실전 앱키 EGW00201 방지 균형 간격 (~7.5 req/s)
         self._token: str = ""
         self._token_expire_ts: float = 0.0
         self._token_issued_date_kst: str = ""
@@ -135,6 +136,20 @@ class KISProvider(MarketDataProvider):
         self._marcap_map_cache: dict[str, int] = {}
         self._holiday_cache: dict[str, bool] = {}
         self._sector_map_cache: dict[str, str] | None = None
+
+    @property
+    def _session(self) -> requests.Session:
+        if self._override_session is not None:
+            return self._override_session
+        sess = getattr(self._local, "session", None)
+        if sess is None:
+            sess = requests.Session()
+            self._local.session = sess
+        return sess
+
+    @_session.setter
+    def _session(self, val: Any) -> None:
+        self._override_session = val
 
     def _require_credentials(self) -> None:
         if not self.app_key or not self.app_secret:
@@ -325,8 +340,10 @@ class KISProvider(MarketDataProvider):
                 if str(payload.get("rt_cd")) == "0":
                     return payload
                 msg_cd = str(payload.get("msg_cd") or "")
-                # 초당 거래건수 초과 재시도
+                # 초당 거래건수 초과 재시도 + 동적 간격 완화
                 if msg_cd == "EGW00201" and attempt < 4:
+                    with self._lock:
+                        self._min_interval_sec = min(0.25, self._min_interval_sec + 0.03)
                     time.sleep(0.55 * (attempt + 1))
                     continue
                 # 토큰 만료 코드 재시도 (요청당 최대 1회만 갱신)
@@ -457,7 +474,7 @@ class KISProvider(MarketDataProvider):
         cursor_end = end_dt
         # KIS inquire-daily-itemchartprice는 1회 최대 100건 반환 -> 분할 역추적
         for _ in range(4):
-            cursor_start = cursor_end - timedelta(days=170)
+            cursor_start = cursor_end - timedelta(days=195)
             payload = self._request_get(
                 "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
                 "FHKST03010100",
